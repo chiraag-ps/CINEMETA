@@ -1,4 +1,4 @@
-import { Movie } from '../types';
+﻿import { Movie } from '../types';
 
 export const INITIAL_MOVIES: Movie[] = [
   {
@@ -806,7 +806,7 @@ export const INITIAL_MOVIES: Movie[] = [
     runtime: 135,
     genres: ["Horror", "Fantasy"],
     director: "Andy Muschietti",
-    actors: ["Jaeden Martell", "Bill Skarsgård", "Finn Wolfhard", "Sophia Lillis"],
+    actors: ["Jaeden Martell", "Bill SkarsgÃ¥rd", "Finn Wolfhard", "Sophia Lillis"],
     language: "en",
     country: "United States",
     budget: 35000000,
@@ -906,7 +906,7 @@ export const INITIAL_MOVIES: Movie[] = [
   {
     id: 13,
     title: "Forrest Gump",
-    overview: "A man with a low IQ has accomplished great things in his life and been present during significant historic events—each time, far exceeding what anyone imagined he could do.",
+    overview: "A man with a low IQ has accomplished great things in his life and been present during significant historic eventsâ€”each time, far exceeding what anyone imagined he could do.",
     poster_path: "/arA232A201A.jpg",
     backdrop_path: "/kA232A201A.jpg",
     release_date: "1994-06-23",
@@ -938,7 +938,7 @@ export const INITIAL_MOVIES: Movie[] = [
     runtime: 166,
     genres: ["Science Fiction", "Adventure"],
     director: "Denis Villeneuve",
-    actors: ["Timothée Chalamet", "Zendaya", "Rebecca Ferguson", "Javier Bardem"],
+    actors: ["TimothÃ©e Chalamet", "Zendaya", "Rebecca Ferguson", "Javier Bardem"],
     language: "en",
     country: "United States",
     budget: 190000000,
@@ -950,8 +950,34 @@ export const INITIAL_MOVIES: Movie[] = [
 ];
 
 // Helper to provide image fallback URLs if poster or backdrop relative paths need full TMDb CDN base
-export function getImageUrl(path: string | null | undefined, size: 'w500' | 'original' = 'w500'): string {
-  if (!path) return 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=1000&auto=format&fit=crop';
-  if (path.startsWith('http')) return path;
-  return `https://image.tmdb.org/t/p/${size}${path}`;
+export function getImageUrl(
+  path: string | null | undefined,
+  size: 'w500' | 'original' = 'w500'
+): string {
+  const fallback =
+    'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=1000&auto=format&fit=crop';
+
+  if (!path || typeof path !== 'string') {
+    return fallback;
+  }
+
+  const cleanPath = path.trim();
+
+  if (!cleanPath || cleanPath === 'null' || cleanPath === 'undefined') {
+    return fallback;
+  }
+
+  if (
+    cleanPath.startsWith('http://') ||
+    cleanPath.startsWith('https://')
+  ) {
+    return cleanPath;
+  }
+
+  const normalizedPath = cleanPath.startsWith('/')
+    ? cleanPath
+    : `/${cleanPath}`;
+
+  return `https://image.tmdb.org/t/p/${size}${normalizedPath}`;
 }
+

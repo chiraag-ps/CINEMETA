@@ -1,3 +1,4 @@
+import { tmdbService } from '../api/tmdb';
 import {
   Movie,
   RecommendationResult,
@@ -437,18 +438,18 @@ export class MetaLearningRecommendationEngine {
   /**
    * Unified Two-Stage Hybrid Recommendation Pipeline
    */
-  public generateUnifiedRecommendations(
+  public async generateUnifiedRecommendations(
     user?: UserProfile,
     selectedMovieIdsOverride?: number[],
     topN: number = 20,
     diversityLambdaOverride?: number
-  ): {
+  ): Promise<{
     recommendations: RecommendationResult[];
     algorithmUsed: 'unified_hybrid';
     interactionCount: number;
     metaDecisionReason: string;
-    metrics: EvaluationMetrics;
-  } {
+       metrics: EvaluationMetrics;
+  }> {
     const allMovies = db.getAllMovies();
     if (allMovies.length === 0) {
       return {
@@ -489,14 +490,43 @@ export class MetaLearningRecommendationEngine {
     const taste = this.featureExtractor.extractUserTaste(sourceMovies, user);
 
     // 4. STAGE 1: Candidate Generation (Retrieval Pool of 150 candidates)
-    const candidatePool = this.candidateGenerator.generateCandidatePool(
-      allMovies,
-      taste,
-      excludedSet,
-      this.featureExtractor,
-      user,
-      150
+   // 4. STAGE 1: Candidate Generation
+//
+// For warm/few-shot users:
+//   Use interaction movies as TMDb seeds.
+//
+// For cold-start users:
+//   Use TMDb discovery based on onboarding preferences.
+//
+// Both paths feed into the SAME CandidateGenerator.
+let tmdbCandidates: Movie[] = [];
+
+if (sourceMovies.length > 0) {
+  // Warm / few-shot TMDb expansion from known taste seeds.
+  tmdbCandidates =
+    await tmdbService.fetchRecommendationsForMovies(
+      sourceMovies
     );
+} else {
+  // Cold-start TMDb discovery.
+  tmdbCandidates =
+    await tmdbService.fetchColdStartCandidates(
+      user
+    );
+}
+
+const expandedCatalog = db.getAllMovies();
+
+const candidatePool =
+  this.candidateGenerator.generateCandidatePool(
+    expandedCatalog,
+    taste,
+    excludedSet,
+    this.featureExtractor,
+    user,
+    150,
+    tmdbCandidates
+  );
 
     // Fallback if candidate pool is empty
     if (candidatePool.length === 0) {
@@ -529,7 +559,7 @@ export class MetaLearningRecommendationEngine {
 
     // 7. Format Recommendations with Calibrated Confidence Scores
     const recommendations: RecommendationResult[] = diverseRanked.map(item => {
-      const confidence = Math.round(Math.min(99, Math.max(65, item.score * 100)));
+      const confidence = Math.round(Math.min(99, Math.max(1, item.score * 100)));
       return {
         movie: item.movie,
         similarity_score: Math.round(item.score * 100) / 100,
@@ -622,12 +652,12 @@ export class MetaLearningRecommendationEngine {
   /**
    * Content-Based Pipeline
    */
-  public generateContentBasedRecommendations(
+  public async generateContentBasedRecommendations(
     user?: UserProfile,
     selectedMovieIds: number[] = [],
     topN: number = 20
-  ): RecommendationResult[] {
-    const unified = this.generateUnifiedRecommendations(user, selectedMovieIds, topN, 0.90);
+  ): Promise<RecommendationResult[]> {
+    const unified = await this.generateUnifiedRecommendations(user, selectedMovieIds, topN, 0.90);
     return unified.recommendations.map(r => ({
       ...r,
       algorithm_used: 'content_based' as const
@@ -637,12 +667,12 @@ export class MetaLearningRecommendationEngine {
   /**
    * Collaborative Filtering Pipeline
    */
-  public generateCollaborativeRecommendations(
+  public async generateCollaborativeRecommendations(
     user?: UserProfile,
     selectedMovieIds: number[] = [],
     topN: number = 20
-  ): RecommendationResult[] {
-    const unified = this.generateUnifiedRecommendations(user, selectedMovieIds, topN, 0.70);
+  ): Promise<RecommendationResult[]> {
+    const unified = await this.generateUnifiedRecommendations(user, selectedMovieIds, topN, 0.70);
     return unified.recommendations.map(r => ({
       ...r,
       algorithm_used: 'collaborative_filtering' as const,
@@ -835,3 +865,4 @@ export class MetaLearningRecommendationEngine {
 }
 
 export const recommenderEngine = new MetaLearningRecommendationEngine();
+

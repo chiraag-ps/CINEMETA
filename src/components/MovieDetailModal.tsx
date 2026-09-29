@@ -563,7 +563,7 @@ export const MovieDetailModal: React.FC<MovieDetailModalProps> = ({
                     >
                       <div className="relative aspect-[2/3] rounded-lg overflow-hidden mb-1.5">
                         <img
-                          src={rec.movie.poster_path ? (rec.movie.poster_path.startsWith('http') ? rec.movie.poster_path : `https://image.tmdb.org/t/p/w500${rec.movie.poster_path}`) : '/placeholder-poster.jpg'}
+                          src={getImageUrl(rec.movie.poster_path, 'w500')}
                           alt={rec.movie.title}
                           className="w-full h-full object-cover"
                         />

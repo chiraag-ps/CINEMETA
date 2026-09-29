@@ -1,17 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Search,
   Film,
   Bookmark,
-  Sparkles,
   User,
-  LogOut,
-  History,
   Compass,
-  BarChart3,
   Bot,
   Sliders,
-  ShieldCheck
 } from 'lucide-react';
 import { Movie, UserProfile } from '../types';
 import { api } from '../services/api';
@@ -34,7 +29,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onOpenAuthModal,
   onOpenMovieModal,
   onOpenOnboarding,
-  onOpenAiAssistant
+  onOpenAiAssistant,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Movie[]>([]);
@@ -50,11 +45,12 @@ export const Navbar: React.FC<NavbarProps> = ({
 
     const timer = setTimeout(async () => {
       setIsSearching(true);
+
       try {
         const results = await api.searchMovies(searchQuery);
         setSearchResults(results);
-      } catch (err) {
-        console.error('Search error:', err);
+      } catch (error) {
+        console.error('Search error:', error);
       } finally {
         setIsSearching(false);
       }
@@ -63,150 +59,129 @@ export const Navbar: React.FC<NavbarProps> = ({
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
+  const navButtonClass = (active: boolean) =>
+    `px-3 py-2 rounded-lg text-sm transition-colors flex items-center gap-2 ${
+      active
+        ? 'bg-zinc-800 text-white'
+        : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+    }`;
+
   return (
-    <header className="sticky top-0 z-40 bg-zinc-950/90 backdrop-blur-md border-b border-zinc-800/80 px-4 md:px-8 py-3 transition-all duration-200">
-      <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
-        {/* Brand Logo */}
-        <div className="flex items-center gap-6">
+    <header className="sticky top-0 z-40 border-b border-zinc-800/80 bg-zinc-950/95 backdrop-blur-sm">
+      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3 md:px-6">
+
+        {/* Brand */}
+        <button
+          onClick={() => setCurrentView('home')}
+          className="group flex shrink-0 items-center gap-2.5 text-left focus:outline-none"
+          id="brand-logo-btn"
+        >
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-red-600 text-white transition-transform duration-200 group-hover:scale-105">
+            <Film className="h-5 w-5" />
+          </div>
+
+          <div className="leading-none">
+            <span className="text-xl font-bold tracking-[0.08em] text-zinc-100">
+              CINEMETA
+            </span>
+            <span className="mt-1 block text-[9px] uppercase tracking-[0.2em] text-zinc-500">
+              Find something worth watching
+            </span>
+          </div>
+        </button>
+
+        {/* Navigation */}
+        <nav className="hidden items-center gap-1 lg:flex">
           <button
             onClick={() => setCurrentView('home')}
-            className="flex items-center gap-2 group text-left focus:outline-none"
-            id="brand-logo-btn"
+            id="nav-home-btn"
+            className={navButtonClass(currentView === 'home')}
           >
-            <div className="w-9 h-9 rounded-lg bg-gradient-to-tr from-red-600 to-rose-500 flex items-center justify-center text-white shadow-lg shadow-red-900/30 group-hover:scale-105 transition-transform">
-              <Film className="w-5 h-5" />
-            </div>
-            <div>
-              <span className="text-xl font-extrabold tracking-wider bg-gradient-to-r from-white via-zinc-200 to-zinc-400 bg-clip-text text-transparent">
-                CINEMETA
-              </span>
-              <span className="hidden sm:inline-block ml-2 text-[10px] font-semibold tracking-widest text-red-500 uppercase px-2 py-0.5 rounded bg-red-950/60 border border-red-800/40">
-                META-LEARNING AI
-              </span>
-            </div>
+            <Compass className="h-4 w-4 text-red-400" />
+            Explore
           </button>
 
-          {/* Navigation Links */}
-          <nav className="hidden md:flex items-center gap-1">
-            <button
-              onClick={() => setCurrentView('home')}
-              id="nav-home-btn"
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
-                currentView === 'home'
-                  ? 'bg-zinc-800 text-white font-semibold'
-                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-              }`}
-            >
-              <Compass className="w-4 h-4 text-rose-500" />
-              Explore
-            </button>
-            <button
-              onClick={() => setCurrentView('recommendations')}
-              id="nav-recommendations-btn"
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
-                currentView === 'recommendations'
-                  ? 'bg-red-950/80 text-rose-300 border border-red-800/50 font-semibold'
-                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-              }`}
-            >
-              <Sparkles className="w-4 h-4 text-red-500 animate-pulse" />
-              AI Recommendations
-            </button>
-            <button
-              onClick={() => setCurrentView('watchlist')}
-              id="nav-watchlist-btn"
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
-                currentView === 'watchlist'
-                  ? 'bg-zinc-800 text-white font-semibold'
-                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-              }`}
-            >
-              <Bookmark className="w-4 h-4 text-emerald-400" />
-              My Library
-              {user && user.watchlistMovieIds && user.watchlistMovieIds.length > 0 && (
-                <span className="ml-1 text-xs bg-emerald-900/60 text-emerald-300 px-1.5 py-0.2 rounded-full border border-emerald-700/50">
-                  {user.watchlistMovieIds.length}
-                </span>
-              )}
-            </button>
-            <button
-              onClick={() => setCurrentView('admin')}
-              id="nav-admin-btn"
-              className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors flex items-center gap-1.5 ${
-                currentView === 'admin'
-                  ? 'bg-zinc-800 text-white font-semibold'
-                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-              }`}
-            >
-              <BarChart3 className="w-4 h-4 text-sky-400" />
-              Admin & Analytics
-            </button>
-          </nav>
-        </div>
+          <button
+            onClick={() => setCurrentView('recommendations')}
+            id="nav-recommendations-btn"
+            className={navButtonClass(currentView === 'recommendations')}
+          >
+            <span className="text-sm">✦</span>
+            Discover
+          </button>
 
-        {/* Search Bar & User Actions */}
-        <div className="flex items-center gap-2.5">
-          
-          {/* AI Assistant Button */}
+          <button
+            onClick={() => setCurrentView('watchlist')}
+            id="nav-watchlist-btn"
+            className={navButtonClass(currentView === 'watchlist')}
+          >
+            <Bookmark className="h-4 w-4 text-emerald-400" />
+            My List
+            {user?.watchlistMovieIds?.length ? (
+              <span className="text-[11px] text-zinc-500">
+                {user.watchlistMovieIds.length}
+              </span>
+            ) : null}
+          </button>
+        </nav>
+
+        {/* Search + actions */}
+        <div className="flex min-w-0 items-center gap-2">
           {onOpenAiAssistant && (
             <button
               onClick={onOpenAiAssistant}
-              className="px-3 py-1.5 bg-gradient-to-r from-red-600/20 to-amber-600/20 hover:from-red-600/30 hover:to-amber-600/30 border border-red-500/30 text-rose-300 hover:text-white rounded-full text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
-              title="Open AI Movie Concierge"
+              className="hidden items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white sm:flex"
+              title="Ask CINEMETA"
             >
-              <Bot className="w-3.5 h-3.5 text-amber-400" />
-              <span className="hidden sm:inline">AI Concierge</span>
+              <Bot className="h-4 w-4 text-red-400" />
+              Ask CINEMETA
             </button>
           )}
 
-          {/* Onboarding Calibrate Button */}
           {onOpenOnboarding && (
             <button
               onClick={onOpenOnboarding}
-              className="hidden lg:flex px-3 py-1.5 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 hover:text-white rounded-full text-xs font-semibold items-center gap-1.5 transition-colors"
-              title="Calibrate Cold-Start Vector"
+              className="hidden items-center gap-1.5 rounded-lg px-2.5 py-2 text-xs font-medium text-zinc-400 transition-colors hover:bg-zinc-900 hover:text-white xl:flex"
+              title="Tune your movie picks"
             >
-              <Sliders className="w-3.5 h-3.5 text-red-500" />
-              <span>Calibrate Taste</span>
+              <Sliders className="h-3.5 w-3.5" />
+              Tune my picks
             </button>
           )}
 
-          {/* Instant Search Bar */}
-          <div className="relative w-36 sm:w-56 md:w-64">
-            <div className="relative">
-              <Search className="w-4 h-4 text-zinc-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                placeholder="Search movies..."
-                value={searchQuery}
-                onChange={e => {
-                  setSearchQuery(e.target.value);
-                  setShowSearchDropdown(true);
-                }}
-                onFocus={() => setShowSearchDropdown(true)}
-                className="w-full bg-zinc-900 border border-zinc-800 text-zinc-200 text-xs sm:text-sm rounded-full pl-9 pr-3 py-1.5 focus:outline-none focus:border-red-600 focus:ring-1 focus:ring-red-600/50 transition-all placeholder:text-zinc-500"
-                id="movie-search-input"
-              />
-            </div>
+          <div className="relative hidden w-44 sm:block md:w-56">
+            <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
 
-            {/* Instant Search Dropdown */}
-            {showSearchDropdown && searchQuery.trim().length > 0 && (
-              <div className="absolute right-0 top-full mt-2 w-72 sm:w-80 bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden z-50 max-h-96 overflow-y-auto">
+            <input
+              type="text"
+              placeholder="Find a movie..."
+              value={searchQuery}
+              onChange={(event) => {
+                setSearchQuery(event.target.value);
+                setShowSearchDropdown(true);
+              }}
+              onFocus={() => setShowSearchDropdown(true)}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-900/80 py-2 pl-9 pr-3 text-sm text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-zinc-700 focus:bg-zinc-900"
+              id="movie-search-input"
+            />
+
+            {showSearchDropdown && searchQuery.trim() && (
+              <div className="absolute right-0 top-full mt-2 max-h-96 w-80 overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl">
                 {isSearching ? (
-                  <div className="p-4 text-center text-xs text-zinc-400 flex items-center justify-center gap-2">
-                    <div className="w-4 h-4 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-                    Searching TMDb database...
+                  <div className="p-4 text-center text-xs text-zinc-500">
+                    Finding movies...
                   </div>
                 ) : searchResults.length === 0 ? (
                   <div className="p-4 text-center text-xs text-zinc-500">
-                    No movies found matching "{searchQuery}"
+                    Nothing matched “{searchQuery}”
                   </div>
                 ) : (
-                  <div className="p-2 space-y-1">
-                    <div className="px-3 py-1 text-[11px] font-semibold text-zinc-500 uppercase tracking-wider">
-                      Movies Found ({searchResults.length})
+                  <div className="p-2">
+                    <div className="px-2 py-2 text-[10px] font-semibold uppercase tracking-[0.16em] text-zinc-600">
+                      Search results
                     </div>
-                    {searchResults.slice(0, 6).map(movie => (
+
+                    {searchResults.slice(0, 6).map((movie) => (
                       <button
                         key={movie.id}
                         onClick={() => {
@@ -214,28 +189,25 @@ export const Navbar: React.FC<NavbarProps> = ({
                           setShowSearchDropdown(false);
                           setSearchQuery('');
                         }}
-                        className="w-full flex items-center gap-3 p-2 hover:bg-zinc-800 rounded-lg text-left transition-colors group"
+                        className="flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors hover:bg-zinc-800"
                       >
                         <img
                           src={getImageUrl(movie.poster_path, 'w500')}
                           alt={movie.title}
-                          className="w-10 h-14 object-cover rounded shadow-sm group-hover:scale-105 transition-transform"
+                          className="h-14 w-10 rounded object-cover"
                         />
-                        <div className="flex-1 min-w-0">
-                          <h4 className="text-sm font-semibold text-zinc-200 truncate group-hover:text-white">
+
+                        <div className="min-w-0 flex-1">
+                          <h4 className="truncate text-sm font-medium text-zinc-100">
                             {movie.title}
                           </h4>
-                          <p className="text-xs text-zinc-400 truncate">
-                            {movie.release_date?.substring(0, 4)} • {movie.director || 'Popular'}
+                          <p className="mt-0.5 truncate text-xs text-zinc-500">
+                            {movie.release_date?.substring(0, 4) || '—'}
+                            {movie.director ? ` • ${movie.director}` : ''}
                           </p>
-                          <div className="flex items-center gap-2 mt-0.5">
-                            <span className="text-[10px] text-amber-400 font-bold">
-                              ★ {movie.vote_average.toFixed(1)}
-                            </span>
-                            <span className="text-[10px] text-zinc-500">
-                              {Array.isArray(movie.genres) ? movie.genres.slice(0, 2).map(g => typeof g === 'string' ? g : g.name).join(', ') : ''}
-                            </span>
-                          </div>
+                          <p className="mt-1 text-[11px] text-amber-400">
+                            ★ {movie.vote_average.toFixed(1)}
+                          </p>
                         </div>
                       </button>
                     ))}
@@ -245,30 +217,29 @@ export const Navbar: React.FC<NavbarProps> = ({
             )}
           </div>
 
-          {/* Profile / Auth Button */}
           {user ? (
             <button
               onClick={() => setCurrentView('profile')}
               id="user-profile-btn"
-              className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 p-1.5 sm:px-3 rounded-full text-xs font-medium text-zinc-200 transition-all hover:bg-zinc-800"
+              className="flex items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors hover:bg-zinc-900"
             >
-              <div className="w-6 h-6 rounded-full bg-gradient-to-tr from-rose-600 to-red-500 flex items-center justify-center text-white font-bold text-xs">
+              <div className="flex h-7 w-7 items-center justify-center rounded-full bg-red-600 text-xs font-semibold text-white">
                 {user.name.charAt(0).toUpperCase()}
               </div>
-              <span className="hidden sm:inline-block max-w-[100px] truncate">
+
+              <span className="hidden max-w-[100px] truncate text-sm text-zinc-300 md:block">
                 {user.name}
               </span>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-950 text-red-400 border border-red-800/40">
-                {user.interactionCount}
-              </span>
+
+              <User className="hidden h-3.5 w-3.5 text-zinc-600 lg:block" />
             </button>
           ) : (
             <button
               onClick={onOpenAuthModal}
               id="login-register-btn"
-              className="bg-red-600 hover:bg-red-700 text-white text-xs sm:text-sm font-semibold px-4 py-2 rounded-full shadow-lg shadow-red-900/40 transition-all hover:scale-105"
+              className="rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-red-500"
             >
-              Sign In
+              Sign in
             </button>
           )}
         </div>

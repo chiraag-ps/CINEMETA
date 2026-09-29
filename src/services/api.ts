@@ -8,43 +8,136 @@ import {
   WatchProvidersResponse,
   MovieTrailerResult,
   OnboardingPreferences,
-  NlpSearchFilter
+  NlpSearchFilter,
 } from '../types';
 
 const API_BASE = '/api';
 
 function getAuthHeaders(): Record<string, string> {
   const token = localStorage.getItem('cinemeta_token');
-  return token ? { 'Authorization': `Bearer ${token}` } : {};
+
+  return token
+    ? {
+        Authorization: `Bearer ${token}`,
+      }
+    : {};
+}
+
+function jsonHeaders(): Record<string, string> {
+  return {
+    'Content-Type': 'application/json',
+    ...getAuthHeaders(),
+  };
+}
+
+async function parseResponse<T>(res: Response): Promise<T> {
+  let data: any = null;
+
+  try {
+    data = await res.json();
+  } catch {
+    data = null;
+  }
+
+  if (!res.ok) {
+    const message =
+      data?.error ||
+      data?.message ||
+      `Request failed with status ${res.status}`;
+
+    throw new Error(message);
+  }
+
+  return data as T;
+}
+
+async function get<T>(url: string, authenticated = false): Promise<T> {
+  const res = await fetch(`${API_BASE}${url}`, {
+    method: 'GET',
+    headers: authenticated ? getAuthHeaders() : {},
+  });
+
+  return parseResponse<T>(res);
+}
+
+async function post<T>(
+  url: string,
+  body?: unknown,
+  authenticated = false,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${url}`, {
+    method: 'POST',
+    headers: authenticated ? jsonHeaders() : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  return parseResponse<T>(res);
+}
+
+async function put<T>(
+  url: string,
+  body?: unknown,
+  authenticated = false,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${url}`, {
+    method: 'PUT',
+    headers: authenticated ? jsonHeaders() : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+
+  return parseResponse<T>(res);
 }
 
 export const api = {
-  // Auth
-  async register(name: string, email: string, password: string, avatar?: string): Promise<{ user: UserProfile; token: string }> {
-    const res = await fetch(`${API_BASE}/auth/register`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, email, password, avatar })
+  // ============================================================
+  // AUTH
+  // ============================================================
+
+  async register(
+    name: string,
+    email: string,
+    password: string,
+    avatar?: string,
+  ): Promise<{
+    user: UserProfile;
+    token: string;
+  }> {
+    const data = await post<{
+      user: UserProfile;
+      token: string;
+    }>('/auth/register', {
+      name,
+      email,
+      password,
+      avatar,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Registration failed');
+
     if (data.token) {
       localStorage.setItem('cinemeta_token', data.token);
     }
+
     return data;
   },
 
-  async login(email: string, password: string): Promise<{ user: UserProfile; token: string }> {
-    const res = await fetch(`${API_BASE}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
+  async login(
+    email: string,
+    password: string,
+  ): Promise<{
+    user: UserProfile;
+    token: string;
+  }> {
+    const data = await post<{
+      user: UserProfile;
+      token: string;
+    }>('/auth/login', {
+      email,
+      password,
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Login failed');
+
     if (data.token) {
       localStorage.setItem('cinemeta_token', data.token);
     }
+
     return data;
   },
 
@@ -52,228 +145,306 @@ export const api = {
     try {
       await fetch(`${API_BASE}/auth/logout`, {
         method: 'POST',
-        headers: { ...getAuthHeaders() }
+        headers: getAuthHeaders(),
       });
     } catch {
-      // ignore
+      // Logout should always clear the local token.
     } finally {
       localStorage.removeItem('cinemeta_token');
     }
   },
 
-  async getMe(): Promise<{ user: UserProfile; isGuest: boolean }> {
-    const res = await fetch(`${API_BASE}/auth/me`, {
-      headers: { ...getAuthHeaders() }
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to fetch user');
-    return data;
+  async getMe(): Promise<{
+    user: UserProfile;
+    isGuest: boolean;
+  }> {
+    return get('/auth/me', true);
   },
 
   async getProfile(): Promise<UserProfile> {
-    const res = await fetch(`${API_BASE}/auth/me`, {
-      headers: { ...getAuthHeaders() }
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to fetch user profile');
+    const data = await get<{
+      user: UserProfile;
+    }>('/auth/me', true);
+
     return data.user;
   },
 
   async getUserProfile(): Promise<UserProfile> {
-    const res = await fetch(`${API_BASE}/users/profile`, {
-      headers: { ...getAuthHeaders() }
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to fetch user profile');
+    const data = await get<{
+      profile: UserProfile;
+    }>('/users/profile', true);
+
     return data.profile;
   },
 
-  // Onboarding
+  // ============================================================
+  // ONBOARDING
+  // ============================================================
+
   async submitOnboarding(payload: {
     favoriteMovieIds: number[];
     favoriteGenres: string[];
     preferredLanguages: string[];
     preferences: OnboardingPreferences;
     favoriteMovies?: Movie[];
-  }): Promise<{ user: UserProfile; message: string }> {
-    const res = await fetch(`${API_BASE}/onboarding`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify(payload)
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to submit onboarding');
-    return data;
+  }): Promise<{
+    user: UserProfile;
+    message: string;
+  }> {
+    return post('/onboarding', payload, true);
   },
 
-  // User Actions
-  async updatePreferences(preferences: Partial<UserProfile>): Promise<UserProfile> {
-    const res = await fetch(`${API_BASE}/user/preferences`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify(preferences)
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to update preferences');
+  // ============================================================
+  // USER PREFERENCES
+  // ============================================================
+
+  async updatePreferences(
+    preferences: Partial<UserProfile>,
+  ): Promise<UserProfile> {
+    const data = await put<{
+      user: UserProfile;
+    }>('/user/preferences', preferences, true);
+
     return data.user;
   },
 
-  async rateMovie(movieId: number, rating: number): Promise<UserProfile> {
-    const res = await fetch(`${API_BASE}/user/rate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ movieId, rating })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to rate movie');
+  // ============================================================
+  // USER MOVIE ACTIONS
+  // ============================================================
+
+  async rateMovie(
+    movieId: number,
+    rating: number,
+  ): Promise<UserProfile> {
+    const data = await post<{
+      user: UserProfile;
+    }>(
+      '/user/rate',
+      {
+        movieId,
+        rating,
+      },
+      true,
+    );
+
     return data.user;
   },
 
-  async toggleWatchlist(movieId: number): Promise<{ inWatchlist: boolean; user: UserProfile }> {
-    const res = await fetch(`${API_BASE}/user/watchlist/toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ movieId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to update watchlist');
-    return data;
+  async toggleWatchlist(
+    movieId: number,
+  ): Promise<{
+    inWatchlist: boolean;
+    user: UserProfile;
+  }> {
+    return post(
+      '/user/watchlist/toggle',
+      {
+        movieId,
+      },
+      true,
+    );
   },
 
-  async toggleLike(movieId: number): Promise<{ isLiked: boolean; user: UserProfile }> {
-    const res = await fetch(`${API_BASE}/user/like/toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ movieId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to toggle like');
-    return data;
+  async toggleLike(
+    movieId: number,
+  ): Promise<{
+    isLiked: boolean;
+    user: UserProfile;
+  }> {
+    return post(
+      '/user/like/toggle',
+      {
+        movieId,
+      },
+      true,
+    );
   },
 
-  async toggleDislike(movieId: number): Promise<{ isDisliked: boolean; user: UserProfile }> {
-    const res = await fetch(`${API_BASE}/user/dislike/toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ movieId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to toggle dislike');
-    return data;
+  async toggleDislike(
+    movieId: number,
+  ): Promise<{
+    isDisliked: boolean;
+    user: UserProfile;
+  }> {
+    return post(
+      '/user/dislike/toggle',
+      {
+        movieId,
+      },
+      true,
+    );
   },
 
-  async toggleWatched(movieId: number): Promise<{ isWatched: boolean; user: UserProfile }> {
-    const res = await fetch(`${API_BASE}/user/watched/toggle`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ movieId })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Failed to toggle watched status');
-    return data;
+  async toggleWatched(
+    movieId: number,
+  ): Promise<{
+    isWatched: boolean;
+    user: UserProfile;
+  }> {
+    return post(
+      '/user/watched/toggle',
+      {
+        movieId,
+      },
+      true,
+    );
   },
 
-  // Movies
+  // ============================================================
+  // MOVIES
+  // ============================================================
+
   async getPopularMovies(): Promise<Movie[]> {
-    const res = await fetch(`${API_BASE}/movies/popular`);
-    const data = await res.json();
+    const data = await get<{
+      movies?: Movie[];
+    }>('/movies/popular');
+
     return data.movies || [];
   },
 
   async getTopRatedMovies(): Promise<Movie[]> {
-    const res = await fetch(`${API_BASE}/movies/top-rated`);
-    const data = await res.json();
+    const data = await get<{
+      movies?: Movie[];
+    }>('/movies/top-rated');
+
     return data.movies || [];
   },
 
   async getTrendingMovies(): Promise<Movie[]> {
-    const res = await fetch(`${API_BASE}/movies/trending`);
-    const data = await res.json();
+    const data = await get<{
+      movies?: Movie[];
+    }>('/movies/trending');
+
     return data.movies || [];
   },
 
   async searchMovies(query: string): Promise<Movie[]> {
-    const res = await fetch(`${API_BASE}/movies/search?q=${encodeURIComponent(query)}`);
-    const data = await res.json();
+    const data = await get<{
+      movies?: Movie[];
+    }>(
+      `/movies/search?q=${encodeURIComponent(query)}`,
+    );
+
     return data.movies || [];
   },
 
   async getMovieDetails(id: number): Promise<Movie> {
-    const res = await fetch(`${API_BASE}/movies/${id}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Movie not found');
+    const data = await get<{
+      movie: Movie;
+    }>(`/movies/${id}`);
+
     return data.movie;
   },
 
-  async getSimilarMovies(id: number, limit: number = 6): Promise<RecommendationResult[]> {
-    const res = await fetch(`${API_BASE}/movies/${id}/similar?limit=${limit}`);
-    const data = await res.json();
+  async getSimilarMovies(
+    id: number,
+    limit: number = 6,
+  ): Promise<RecommendationResult[]> {
+    const data = await get<{
+      similar?: RecommendationResult[];
+    }>(
+      `/movies/${id}/similar?limit=${encodeURIComponent(String(limit))}`,
+    );
+
     return data.similar || [];
   },
 
-  async getMovieTrailer(id: number): Promise<MovieTrailerResult> {
-    const res = await fetch(`${API_BASE}/movies/${id}/trailer`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Trailer not found');
-    return data;
+  async getMovieTrailer(
+    id: number,
+  ): Promise<MovieTrailerResult> {
+    return get<MovieTrailerResult>(
+      `/movies/${id}/trailer`,
+    );
   },
 
-  async getWatchProviders(id: number, region: string = 'IN'): Promise<WatchProvidersResponse> {
-    const res = await fetch(`${API_BASE}/movies/${id}/providers?region=${encodeURIComponent(region)}`);
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Watch providers not found');
-    return data;
+  async getWatchProviders(
+    id: number,
+    region: string = 'IN',
+  ): Promise<WatchProvidersResponse> {
+    return get<WatchProvidersResponse>(
+      `/movies/${id}/providers?region=${encodeURIComponent(region)}`,
+    );
   },
 
-  // Natural Language Search
-  async nlpSearch(query: string, diversityLambda?: number): Promise<{
+  // ============================================================
+  // NATURAL LANGUAGE SEARCH
+  // ============================================================
+
+  async nlpSearch(
+    query: string,
+    diversityLambda?: number,
+  ): Promise<{
     extractedFilters: NlpSearchFilter;
     recommendations: RecommendationResult[];
   }> {
-    const res = await fetch(`${API_BASE}/movies/nlp-search`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ query, diversityLambda })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'NLP search failed');
+    const data = await post<{
+      extractedFilters: NlpSearchFilter;
+      results?: RecommendationResult[];
+    }>(
+      '/movies/nlp-search',
+      {
+        query,
+        diversityLambda,
+      },
+      true,
+    );
+
     return {
       extractedFilters: data.extractedFilters,
-      recommendations: data.results || []
+      recommendations: data.results || [],
     };
   },
 
-  async searchByNaturalLanguage(query: string): Promise<{
+  async searchByNaturalLanguage(
+    query: string,
+  ): Promise<{
     extractedFilters: NlpSearchFilter;
     results: RecommendationResult[];
   }> {
-    const res = await fetch(`${API_BASE}/movies/nlp-search`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ query })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'NLP search failed');
-    return data;
+    return post(
+      '/movies/nlp-search',
+      {
+        query,
+      },
+      true,
+    );
   },
 
-  // AI Movie Assistant
-  async sendAssistantMessage(message: string): Promise<{
+  // ============================================================
+  // AI MOVIE ASSISTANT
+  // ============================================================
+
+  async sendAssistantMessage(
+    message: string,
+  ): Promise<{
     reply: string;
     recommendedMovies?: Movie[];
     extractedFilters?: any;
   }> {
-    const res = await fetch(`${API_BASE}/ai/assistant`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ message })
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || 'Assistant failed to respond');
-    return data;
+    return post(
+      '/ai/assistant',
+      {
+        message,
+      },
+      true,
+    );
   },
 
-  // Recommendation Engine
+  // ============================================================
+  // RECOMMENDATION ENGINE
+  // ============================================================
+
+  /**
+   * IMPORTANT:
+   *
+   * The frontend does NOT import recommenderEngine anymore.
+   *
+   * All recommendation generation is delegated to:
+   *
+   * POST /api/recommendations/generate
+   *
+   * The backend decides which algorithm/stage to use.
+   */
   async generateRecommendations(options?: {
     selectedMovieIds?: number[];
     selectedMovies?: Movie[];
@@ -285,46 +456,74 @@ export const api = {
     metaDecisionReason: string;
     metrics: any;
   }> {
-    const res = await fetch(`${API_BASE}/recommendations/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify(options || {})
-    });
-    return res.json();
+    return post(
+      '/recommendations/generate',
+      options || {},
+      true,
+    );
   },
 
-  // Reviews & History
-  async getMovieReviews(movieId: number): Promise<UserReview[]> {
-    const res = await fetch(`${API_BASE}/reviews/${movieId}`);
-    const data = await res.json();
+  // ============================================================
+  // REVIEWS
+  // ============================================================
+
+  async getMovieReviews(
+    movieId: number,
+  ): Promise<UserReview[]> {
+    const data = await get<{
+      reviews?: UserReview[];
+    }>(`/reviews/${movieId}`);
+
     return data.reviews || [];
   },
 
-  async addReview(movieId: number, rating: number, comment: string): Promise<UserReview> {
-    const res = await fetch(`${API_BASE}/reviews`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
-      body: JSON.stringify({ movieId, rating, comment })
-    });
-    const data = await res.json();
+  async addReview(
+    movieId: number,
+    rating: number,
+    comment: string,
+  ): Promise<UserReview> {
+    const data = await post<{
+      review: UserReview;
+    }>(
+      '/reviews',
+      {
+        movieId,
+        rating,
+        comment,
+      },
+      true,
+    );
+
     return data.review;
   },
 
+  // ============================================================
+  // RECOMMENDATION HISTORY
+  // ============================================================
+
   async getHistory(): Promise<RecommendationHistoryEntry[]> {
-    const res = await fetch(`${API_BASE}/history`, {
-      headers: { ...getAuthHeaders() }
-    });
-    const data = await res.json();
+    const data = await get<{
+      history?: RecommendationHistoryEntry[];
+    }>('/history', true);
+
     return data.history || [];
   },
 
+  // ============================================================
+  // ADMIN ANALYTICS
+  // ============================================================
+
   async getAdminAnalytics(): Promise<SystemAnalytics> {
-    const res = await fetch(`${API_BASE}/admin/analytics`, {
-      headers: { ...getAuthHeaders() }
-    });
-    const data = await res.json();
+    const data = await get<{
+      analytics: SystemAnalytics;
+    }>('/admin/analytics', true);
+
     return data.analytics;
   },
+
+  // ============================================================
+  // SECURITY TESTS
+  // ============================================================
 
   async runSecurityTests(): Promise<{
     summary: string;
@@ -338,10 +537,6 @@ export const api = {
       details: string;
     }>;
   }> {
-    const res = await fetch(`${API_BASE}/admin/security-test`, {
-      headers: { ...getAuthHeaders() }
-    });
-    const data = await res.json();
-    return data;
-  }
+    return get('/admin/security-test', true);
+  },
 };

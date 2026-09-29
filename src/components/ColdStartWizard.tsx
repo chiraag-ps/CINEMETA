@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+﻿import React, { useState, useEffect } from 'react';
 import {
   Sparkles,
   Cpu,
@@ -151,13 +151,6 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
     }
   };
 
-  // Trigger recommendation when selection changes or lambda changes
-  useEffect(() => {
-    if (selectedMovieIds.length > 0) {
-      handleRunRecommendation();
-    }
-  }, [selectedMovieIds.length, diversityLambda]);
-
   // Determine list of seed candidate movies to show
   const displaySeedCandidates = searchQuery.trim().length > 0
     ? searchResults
@@ -270,7 +263,7 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
             <div className="flex items-center justify-between text-xs font-semibold">
               <span className="text-zinc-300 flex items-center gap-1">
                 <Zap className="w-3.5 h-3.5 text-amber-400" />
-                MMR Diversity (λ = {diversityLambda.toFixed(2)})
+                MMR Diversity (Î» = {diversityLambda.toFixed(2)})
               </span>
               <span className="text-[10px] text-zinc-500 font-mono">
                 {diversityLambda > 0.8 ? 'Max Relevance' : diversityLambda < 0.4 ? 'High Serendipity' : 'Balanced'}
@@ -379,10 +372,10 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
                     <div className="flex-1 min-w-0">
                       <h4 className="text-xs font-bold text-zinc-100 truncate">{movie.title}</h4>
                       <p className="text-[10px] text-zinc-400 truncate">
-                        {movie.release_date?.substring(0, 4)} • {Array.isArray(movie.genres) ? movie.genres.slice(0, 2).map(g => typeof g === 'string' ? g : g.name).join(', ') : ''}
+                        {movie.release_date?.substring(0, 4)} â€¢ {Array.isArray(movie.genres) ? movie.genres.slice(0, 2).map(g => typeof g === 'string' ? g : g.name).join(', ') : ''}
                       </p>
                       <span className="text-[10px] text-amber-400 font-bold">
-                        ★ {movie.vote_average ? movie.vote_average.toFixed(1) : '7.5'}
+                        â˜… {movie.vote_average ? movie.vote_average.toFixed(1) : '7.5'}
                       </span>
                     </div>
 
@@ -432,7 +425,7 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
                       }}
                       className="text-zinc-500 hover:text-white font-bold text-xs bg-zinc-900 rounded-full w-4 h-4 flex items-center justify-center"
                     >
-                      ×
+                      Ã—
                     </button>
                   </span>
                 ))}
@@ -525,3 +518,4 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
     </div>
   );
 };
+

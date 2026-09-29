@@ -16,13 +16,90 @@ export class TMDbService {
     };
   }
 
+private async fetchWithRetry(
+  url: string,
+  retries = 3
+): Promise<Response> {
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const controller = new AbortController();
+
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 20000);
+
+    try {
+      console.log(
+        `[TMDB] Request attempt ${attempt}/${retries}: ${url.split('?')[0]}`
+      );
+
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'CINEMETA/1.0',
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeout);
+
+      console.log(
+        `[TMDB] Response: ${response.status} ${response.statusText}`
+      );
+
+      // Retry temporary TMDB/server errors
+      if (response.status >= 500 && attempt < retries) {
+        console.warn(
+          `[TMDB] Temporary server error ${response.status}. Retrying...`
+        );
+
+        await new Promise(resolve =>
+          setTimeout(resolve, 2000 * attempt)
+        );
+
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+
+      const errorMessage =
+        error instanceof Error
+          ? `${error.name}: ${error.message}`
+          : String(error);
+
+      console.warn(
+        `[TMDB] Request failed (attempt ${attempt}/${retries}): ${errorMessage}`
+      );
+
+      if (attempt < retries) {
+        const delay = 2000 * attempt;
+
+        console.log(
+          `[TMDB] Retrying in ${delay / 1000} seconds...`
+        );
+
+        await new Promise(resolve =>
+          setTimeout(resolve, delay)
+        );
+      }
+    }
+  }
+
+  throw lastError ?? new Error('TMDB request failed');
+}
+
   public async fetchPopularMovies(): Promise<Movie[]> {
     if (!this.apiKey) {
       return db.getAllMovies().sort((a, b) => b.popularity - a.popularity);
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/movie/popular?api_key=${this.apiKey}&language=en-US&page=1`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/popular?api_key=${this.apiKey}&language=en-US&page=1`);
       if (!res.ok) throw new Error(`TMDb error ${res.status}`);
       const data = await res.json();
       const movies = this.formatTMDbMovies(data.results || []);
@@ -40,7 +117,7 @@ export class TMDbService {
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/movie/top_rated?api_key=${this.apiKey}&language=en-US&page=1`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/top_rated?api_key=${this.apiKey}&language=en-US&page=1`);
       if (!res.ok) throw new Error(`TMDb error ${res.status}`);
       const data = await res.json();
       const movies = this.formatTMDbMovies(data.results || []);
@@ -57,7 +134,7 @@ export class TMDbService {
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/trending/movie/week?api_key=${this.apiKey}`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/trending/movie/week?api_key=${this.apiKey}`);
       if (!res.ok) throw new Error(`TMDb error ${res.status}`);
       const data = await res.json();
       const movies = this.formatTMDbMovies(data.results || []);
@@ -80,7 +157,7 @@ export class TMDbService {
     for (const seed of seedMovies.slice(0, 5)) {
       try {
         console.log(`[TMDB PIPELINE LOG] Fetching TMDb recommendations & similar for seed movie "${seed.title}" (ID: ${seed.id}, Lang: ${seed.language})...`);
-        const res = await fetch(`${TMDB_BASE_URL}/movie/${seed.id}/recommendations?api_key=${this.apiKey}&language=en-US&page=1`, { headers: this.headers });
+        const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/${seed.id}/recommendations?api_key=${this.apiKey}&language=en-US&page=1`);
         if (res.ok) {
           const data = await res.json();
           const recs = this.formatTMDbMovies(data.results || []);
@@ -88,7 +165,7 @@ export class TMDbService {
         }
 
         // Also fetch similar movies for additional candidate depth
-        const simRes = await fetch(`${TMDB_BASE_URL}/movie/${seed.id}/similar?api_key=${this.apiKey}&language=en-US&page=1`, { headers: this.headers });
+        const simRes = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/${seed.id}/similar?api_key=${this.apiKey}&language=en-US&page=1`);
         if (simRes.ok) {
           const simData = await simRes.json();
           const sims = this.formatTMDbMovies(simData.results || []);
@@ -99,7 +176,7 @@ export class TMDbService {
         const seedLang = seed.language ? seed.language.toLowerCase() : 'en';
         if (seedLang !== 'en') {
           console.log(`[TMDB PIPELINE LOG] Discovering top TMDb movies for original language "${seedLang}"...`);
-          const discRes = await fetch(`${TMDB_BASE_URL}/discover/movie?api_key=${this.apiKey}&with_original_language=${seedLang}&sort_by=popularity.desc&page=1`, { headers: this.headers });
+          const discRes = await this.fetchWithRetry(`${TMDB_BASE_URL}/discover/movie?api_key=${this.apiKey}&with_original_language=${seedLang}&sort_by=popularity.desc&page=1`);
           if (discRes.ok) {
             const discData = await discRes.json();
             const discMovies = this.formatTMDbMovies(discData.results || []);
@@ -119,6 +196,95 @@ export class TMDbService {
     return db.getAllMovies();
   }
 
+    public async fetchColdStartCandidates(
+    user?: import('../../src/types').UserProfile
+  ): Promise<Movie[]> {
+    if (!this.apiKey) {
+      console.log(
+        `[TMDB PIPELINE LOG] Cold-start discovery skipped: TMDb API key unavailable.`
+      );
+      return db.getAllMovies();
+    }
+
+    try {
+      const preferences = user?.onboardingPreferences || {};
+
+      const preferredLanguage =
+        user?.preferredLanguages?.[0] || 'en';
+
+      const minRating =
+        typeof preferences.minRating === 'number'
+          ? preferences.minRating
+          : 0;
+
+      const maxRuntime =
+        typeof preferences.maxRuntime === 'number'
+          ? preferences.maxRuntime
+          : undefined;
+
+      const params = new URLSearchParams({
+        api_key: this.apiKey,
+        language: 'en-US',
+        sort_by: 'popularity.desc',
+        page: '1',
+        with_original_language: preferredLanguage
+      });
+
+      if (minRating > 0) {
+        params.set(
+          'vote_average.gte',
+          String(minRating)
+        );
+      }
+
+      if (maxRuntime) {
+        params.set(
+          'with_runtime.lte',
+          String(maxRuntime)
+        );
+      }
+
+      console.log(
+        `[TMDB PIPELINE LOG] Cold-start discovery: language=${preferredLanguage}, minRating=${minRating}, maxRuntime=${maxRuntime ?? 'any'}`
+      );
+
+      const res = await this.fetchWithRetry(
+        `${TMDB_BASE_URL}/discover/movie?${params.toString()}`
+      );
+
+      if (!res.ok) {
+        console.warn(
+          `[TMDB PIPELINE LOG] Cold-start discovery failed with status ${res.status}.`
+        );
+        return db.getAllMovies();
+      }
+
+      const data = await res.json();
+
+      const movies =
+        this.formatTMDbMovies(
+          data.results || []
+        );
+
+      if (movies.length > 0) {
+        db.addMovies(movies);
+
+        console.log(
+          `[TMDB PIPELINE LOG] Cold-start discovery added ${movies.length} TMDb candidates. Total catalog: ${db.getAllMovies().length}`
+        );
+      }
+
+      return db.getAllMovies();
+    } catch (err) {
+      console.warn(
+        `[TMDB PIPELINE LOG] Cold-start discovery failed:`,
+        err
+      );
+
+      return db.getAllMovies();
+    }
+  }
+
   public async searchMovies(query: string): Promise<Movie[]> {
     if (!query) return [];
     
@@ -134,7 +300,7 @@ export class TMDbService {
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/search/movie?api_key=${this.apiKey}&query=${encodeURIComponent(query)}&language=en-US`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/search/movie?api_key=${this.apiKey}&query=${encodeURIComponent(query)}&language=en-US`);
       if (!res.ok) return localMatches;
       const data = await res.json();
       const apiMovies = this.formatTMDbMovies(data.results || []);
@@ -166,7 +332,7 @@ export class TMDbService {
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/movie/${movieId}?api_key=${this.apiKey}&append_to_response=credits,videos,keywords`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/${movieId}?api_key=${this.apiKey}&append_to_response=credits,videos,keywords`);
       if (!res.ok) return cached || null;
       const data = await res.json();
       
@@ -351,7 +517,7 @@ export class TMDbService {
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/movie/${movieId}/watch/providers?api_key=${this.apiKey}`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/${movieId}/watch/providers?api_key=${this.apiKey}`);
       if (!res.ok) throw new Error(`TMDb watch providers error: ${res.status}`);
       const data = await res.json();
       const results = data.results || {};
@@ -506,7 +672,7 @@ export class TMDbService {
     }
 
     try {
-      const res = await fetch(`${TMDB_BASE_URL}/movie/${movieId}/videos?api_key=${this.apiKey}`, { headers: this.headers });
+      const res = await this.fetchWithRetry(`${TMDB_BASE_URL}/movie/${movieId}/videos?api_key=${this.apiKey}`);
       if (!res.ok) throw new Error(`TMDb video error: ${res.status}`);
       const data = await res.json();
       const videos = data.results || [];

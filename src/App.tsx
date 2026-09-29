@@ -6,55 +6,145 @@
 import React, { useState, useEffect } from 'react';
 import { Movie, UserProfile } from './types';
 import { api } from './services/api';
+
 import { Navbar } from './components/Navbar';
 import { HomePage } from './pages/HomePage';
 import { ColdStartWizard } from './components/ColdStartWizard';
 import { WatchlistPage } from './pages/WatchlistPage';
 import { ProfilePage } from './pages/ProfilePage';
 import { AdminDashboardPage } from './pages/AdminDashboardPage';
+
 import { MovieDetailModal } from './components/MovieDetailModal';
 import { TrailerModal } from './components/TrailerModal';
 import { AuthModal } from './components/AuthModal';
 import { OnboardingModal } from './components/OnboardingModal';
 import { AiAssistantModal } from './components/AiAssistantModal';
-import { Bot, Sparkles } from 'lucide-react';
+import { Bot } from 'lucide-react';
 
 export default function App() {
-  const [currentView, setCurrentView] = useState<'home' | 'recommendations' | 'watchlist' | 'profile' | 'admin'>('home');
+  const [currentView, setCurrentView] = useState<
+    'home' | 'recommendations' | 'watchlist' | 'profile' | 'admin'
+  >('home');
+
   const [user, setUser] = useState<UserProfile | null>(null);
   const [allMovies, setAllMovies] = useState<Movie[]>([]);
 
-  // Modals state
-  const [selectedMovieModal, setSelectedMovieModal] = useState<Movie | null>(null);
-  const [trailerModalMovie, setTrailerModalMovie] = useState<Movie | null>(null);
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState<boolean>(false);
-  const [isOnboardingModalOpen, setIsOnboardingModalOpen] = useState<boolean>(false);
-  const [isAiAssistantOpen, setIsAiAssistantOpen] = useState<boolean>(false);
+  // Session state
+  const [sessionChecked, setSessionChecked] = useState(false);
 
-  // Initialize User session & Movies Library
+  // Modals
+  const [selectedMovieModal, setSelectedMovieModal] =
+    useState<Movie | null>(null);
+
+  const [trailerModalMovie, setTrailerModalMovie] =
+    useState<Movie | null>(null);
+
+  const [isAuthModalOpen, setIsAuthModalOpen] =
+    useState(false);
+
+  const [isOnboardingModalOpen, setIsOnboardingModalOpen] =
+    useState(false);
+
+  const [isAiAssistantOpen, setIsAiAssistantOpen] =
+    useState(false);
+
+  /*
+   * ---------------------------------------------------------
+   * CHECK LOGIN SESSION
+   * ---------------------------------------------------------
+   *
+   * Important:
+   * We do NOT call /api/auth/me when there is no token.
+   *
+   * Previously, the backend returned the demo user when no
+   * token existed. That caused the Cold-Start Wizard to open
+   * before the login screen.
+   */
+
   useEffect(() => {
+    const token = localStorage.getItem('cinemeta_token');
+
+    // No login token -> show authentication first
+    if (!token) {
+      setUser(null);
+      setSessionChecked(true);
+      return;
+    }
+
+    // Token exists -> validate it
     api.getMe()
-      .then(res => {
+      .then((res) => {
+        if (!res.user || res.isGuest) {
+          throw new Error('Invalid authenticated session');
+        }
+
         setUser(res.user);
-        // Show onboarding if brand new user without ratings or seed preferences
-        if (res.user && res.user.interactionCount === 0 && (!res.user.favoriteGenres || res.user.favoriteGenres.length === 0)) {
-          const onboardingDone = localStorage.getItem(`cinemeta_onboarded_${res.user.id}`);
+
+        /*
+         * New authenticated user:
+         * show onboarding only AFTER login.
+         */
+        if (
+          res.user.interactionCount === 0 &&
+          (!res.user.favoriteGenres ||
+            res.user.favoriteGenres.length === 0)
+        ) {
+          const onboardingDone = localStorage.getItem(
+            `cinemeta_onboarded_${res.user.id}`
+          );
+
           if (!onboardingDone) {
             setIsOnboardingModalOpen(true);
           }
         }
       })
-      .catch(err => console.error('Guest session initialized:', err));
+      .catch((error) => {
+        console.error('Session validation failed:', error);
 
-    api.getPopularMovies()
-      .then(movies => setAllMovies(movies))
-      .catch(err => console.error('Movies fetch error:', err));
+        // Remove invalid token
+        localStorage.removeItem('cinemeta_token');
+
+        setUser(null);
+      })
+      .finally(() => {
+        setSessionChecked(true);
+      });
   }, []);
 
-  // Handlers for User Interactions
-  const handleRateMovie = async (movieId: number, rating: number) => {
+  /*
+   * ---------------------------------------------------------
+   * LOAD MOVIES ONLY AFTER AUTHENTICATION
+   * ---------------------------------------------------------
+   */
+
+  useEffect(() => {
+    if (!user) return;
+
+    api.getPopularMovies()
+      .then((movies) => {
+        setAllMovies(movies);
+      })
+      .catch((err) => {
+        console.error('Movies fetch error:', err);
+      });
+  }, [user?.id]);
+
+  /*
+   * ---------------------------------------------------------
+   * USER INTERACTIONS
+   * ---------------------------------------------------------
+   */
+
+  const handleRateMovie = async (
+    movieId: number,
+    rating: number
+  ) => {
     try {
-      const updatedUser = await api.rateMovie(movieId, rating);
+      const updatedUser = await api.rateMovie(
+        movieId,
+        rating
+      );
+
       setUser(updatedUser);
     } catch (err) {
       console.error('Rate error:', err);
@@ -64,6 +154,7 @@ export default function App() {
   const handleToggleWatchlist = async (movieId: number) => {
     try {
       const res = await api.toggleWatchlist(movieId);
+
       setUser(res.user);
     } catch (err) {
       console.error('Watchlist toggle error:', err);
@@ -73,6 +164,7 @@ export default function App() {
   const handleToggleLike = async (movieId: number) => {
     try {
       const res = await api.toggleLike(movieId);
+
       setUser(res.user);
     } catch (err) {
       console.error('Like toggle error:', err);
@@ -82,6 +174,7 @@ export default function App() {
   const handleToggleDislike = async (movieId: number) => {
     try {
       const res = await api.toggleDislike(movieId);
+
       setUser(res.user);
     } catch (err) {
       console.error('Dislike toggle error:', err);
@@ -91,116 +184,275 @@ export default function App() {
   const handleToggleWatched = async (movieId: number) => {
     try {
       const res = await api.toggleWatched(movieId);
+
       setUser(res.user);
     } catch (err) {
       console.error('Watched toggle error:', err);
     }
   };
 
+  /*
+   * ---------------------------------------------------------
+   * AUTH SUCCESS
+   * ---------------------------------------------------------
+   */
+
+  const handleAuthenticationSuccess = (
+    authenticatedUser: UserProfile
+  ) => {
+    setUser(authenticatedUser);
+    setIsAuthModalOpen(false);
+
+    /*
+     * After successful login/register, check whether this
+     * is a brand-new user who should complete onboarding.
+     */
+    if (authenticatedUser.interactionCount === 0) {
+      const onboardingDone = localStorage.getItem(
+        `cinemeta_onboarded_${authenticatedUser.id}`
+      );
+
+      if (!onboardingDone) {
+        setIsOnboardingModalOpen(true);
+      }
+    }
+  };
+
+  /*
+   * ---------------------------------------------------------
+   * LOGOUT
+   * ---------------------------------------------------------
+   */
+
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+
+    localStorage.removeItem('cinemeta_token');
+
+    setUser(null);
+    setAllMovies([]);
+    setCurrentView('home');
+    setIsOnboardingModalOpen(false);
+    setIsAiAssistantOpen(false);
+  };
+
+  /*
+   * ---------------------------------------------------------
+   * SESSION LOADING SCREEN
+   * ---------------------------------------------------------
+   */
+
+  if (!sessionChecked) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white flex items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto mb-4 w-10 h-10 rounded-xl bg-red-600 flex items-center justify-center shadow-lg shadow-red-900/40">
+            <span className="font-black">C</span>
+          </div>
+
+          <p className="text-sm text-zinc-400">
+            Opening CINEMETA...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * AUTHENTICATION GATE
+   * ---------------------------------------------------------
+   *
+   * No logged-in user = show authentication screen.
+   *
+   * The rest of the application is not rendered until the
+   * user signs in or registers.
+   */
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-zinc-950 text-white">
+        <AuthModal
+          onClose={() => {
+            // Keep authentication required.
+          }}
+          onSuccess={handleAuthenticationSuccess}
+        />
+      </div>
+    );
+  }
+
+  /*
+   * ---------------------------------------------------------
+   * MAIN APPLICATION
+   * ---------------------------------------------------------
+   */
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans antialiased selection:bg-red-600 selection:text-white flex flex-col">
-      {/* Top Header Navbar */}
+
+      {/* Navbar */}
       <Navbar
         currentView={currentView}
-        setCurrentView={(v) => setCurrentView(v as any)}
+        setCurrentView={(view) =>
+          setCurrentView(view as any)
+        }
         user={user}
         onOpenAuthModal={() => setIsAuthModalOpen(true)}
-        onOpenMovieModal={(movie) => setSelectedMovieModal(movie)}
-        onOpenOnboarding={() => setIsOnboardingModalOpen(true)}
-        onOpenAiAssistant={() => setIsAiAssistantOpen(true)}
+        onOpenMovieModal={(movie) =>
+          setSelectedMovieModal(movie)
+        }
+        onOpenOnboarding={() =>
+          setIsOnboardingModalOpen(true)
+        }
+        onOpenAiAssistant={() =>
+          setIsAiAssistantOpen(true)
+        }
       />
 
-      {/* Main Page Views */}
+      {/* Main content */}
       <main className="flex-1 pb-16">
+
+        {/* Home */}
         {currentView === 'home' && (
           <HomePage
             user={user}
             allMovies={allMovies}
-            onOpenDetails={(movie) => setSelectedMovieModal(movie)}
-            onPlayTrailer={(movie) => setTrailerModalMovie(movie)}
+            onOpenDetails={(movie) =>
+              setSelectedMovieModal(movie)
+            }
+            onPlayTrailer={(movie) =>
+              setTrailerModalMovie(movie)
+            }
             onToggleWatchlist={handleToggleWatchlist}
             onRateMovie={handleRateMovie}
-            onNavigateToRecommendations={() => setCurrentView('recommendations')}
+            onNavigateToRecommendations={() =>
+              setCurrentView('recommendations')
+            }
           />
         )}
 
+        {/* Recommendations */}
         {currentView === 'recommendations' && (
           <ColdStartWizard
             user={user}
             allMovies={allMovies}
-            onOpenDetails={(movie) => setSelectedMovieModal(movie)}
-            onPlayTrailer={(movie) => setTrailerModalMovie(movie)}
+            onOpenDetails={(movie) =>
+              setSelectedMovieModal(movie)
+            }
+            onPlayTrailer={(movie) =>
+              setTrailerModalMovie(movie)
+            }
             onToggleWatchlist={handleToggleWatchlist}
             onRateMovie={handleRateMovie}
-            onOpenOnboarding={() => setIsOnboardingModalOpen(true)}
+            onOpenOnboarding={() =>
+              setIsOnboardingModalOpen(true)
+            }
           />
         )}
 
+        {/* Watchlist */}
         {currentView === 'watchlist' && (
           <WatchlistPage
             user={user}
             allMovies={allMovies}
-            onOpenDetails={(movie) => setSelectedMovieModal(movie)}
-            onPlayTrailer={(movie) => setTrailerModalMovie(movie)}
+            onOpenDetails={(movie) =>
+              setSelectedMovieModal(movie)
+            }
+            onPlayTrailer={(movie) =>
+              setTrailerModalMovie(movie)
+            }
             onToggleWatchlist={handleToggleWatchlist}
             onRateMovie={handleRateMovie}
           />
         )}
 
+        {/* Profile */}
         {currentView === 'profile' && (
           <ProfilePage
             user={user}
-            onUpdateUser={(updated) => setUser(updated)}
-            onOpenOnboarding={() => setIsOnboardingModalOpen(true)}
-            onLogout={async () => {
-              await api.logout();
-              setUser(null);
-              setCurrentView('home');
-            }}
+            onUpdateUser={(updated) =>
+              setUser(updated)
+            }
+            onOpenOnboarding={() =>
+              setIsOnboardingModalOpen(true)
+            }
+            onLogout={handleLogout}
           />
         )}
 
+        {/* Admin */}
         {currentView === 'admin' && (
-          <AdminDashboardPage allMovies={allMovies} />
+          <AdminDashboardPage
+            allMovies={allMovies}
+          />
         )}
       </main>
 
-      {/* Floating AI Assistant Trigger */}
+      {/* Floating assistant */}
       <button
         onClick={() => setIsAiAssistantOpen(true)}
-        className="fixed bottom-6 right-6 z-40 p-3.5 bg-gradient-to-tr from-red-600 to-amber-500 hover:from-red-500 hover:to-amber-400 text-white rounded-full shadow-2xl shadow-red-600/50 flex items-center gap-2 transition-all hover:scale-110 active:scale-95 group border border-white/20"
-        title="Open AI Movie Concierge"
+        className="fixed bottom-6 right-6 z-40 flex items-center gap-2 rounded-full border border-zinc-700/60 bg-zinc-900/95 px-4 py-3 text-sm font-medium text-zinc-100 shadow-xl shadow-black/30 transition-all duration-200 hover:-translate-y-1 hover:bg-zinc-800"
+        title="Ask CINEMETA"
         id="floating-ai-assistant-btn"
       >
-        <Bot className="w-5 h-5 animate-pulse" />
-        <span className="hidden sm:inline text-xs font-bold pr-1">Ask AI</span>
+        <Bot className="w-4 h-4" />
+        <span>Ask CINEMETA</span>
       </button>
 
       {/* Footer */}
-      <footer className="bg-zinc-950 border-t border-zinc-900 py-6 text-center text-xs text-zinc-500">
-        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span className="font-extrabold text-white tracking-wider">CINEMETA</span>
-            <span>— Personalized Hybrid Movie Recommendation Platform</span>
-          </div>
-          <p>© 2026 CINEMETA. Built with Meta-Learning ML, Bcrypt, JWT, and Explainable AI.</p>
+      <footer className="border-t border-zinc-900 bg-zinc-950 py-6 text-center">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-4 text-xs text-zinc-500">
+          <span className="font-semibold tracking-wide text-zinc-300">
+            CINEMETA
+          </span>
+
+          <span>
+            Find something worth watching.
+          </span>
         </div>
       </footer>
 
-      {/* Modals */}
+      {/* Movie details */}
       {selectedMovieModal && (
         <MovieDetailModal
           movie={selectedMovieModal}
-          isInWatchlist={user ? user.watchlistMovieIds?.includes(selectedMovieModal.id) || false : false}
-          isLiked={user ? user.likedMovieIds?.includes(selectedMovieModal.id) || false : false}
-          isDisliked={user ? user.dislikedMovieIds?.includes(selectedMovieModal.id) || false : false}
-          isWatched={user ? user.watchedMovieIds?.includes(selectedMovieModal.id) || false : false}
-          userRating={user ? user.ratings[selectedMovieModal.id] : undefined}
-          onClose={() => setSelectedMovieModal(null)}
-          onSelectMovie={(m) => setSelectedMovieModal(m)}
-          onPlayTrailer={(m) => {
+          isInWatchlist={
+            user.watchlistMovieIds?.includes(
+              selectedMovieModal.id
+            ) || false
+          }
+          isLiked={
+            user.likedMovieIds?.includes(
+              selectedMovieModal.id
+            ) || false
+          }
+          isDisliked={
+            user.dislikedMovieIds?.includes(
+              selectedMovieModal.id
+            ) || false
+          }
+          isWatched={
+            user.watchedMovieIds?.includes(
+              selectedMovieModal.id
+            ) || false
+          }
+          userRating={
+            user.ratings[selectedMovieModal.id]
+          }
+          onClose={() =>
+            setSelectedMovieModal(null)
+          }
+          onSelectMovie={(movie) =>
+            setSelectedMovieModal(movie)
+          }
+          onPlayTrailer={(movie) => {
             setSelectedMovieModal(null);
-            setTrailerModalMovie(m);
+            setTrailerModalMovie(movie);
           }}
           onToggleWatchlist={handleToggleWatchlist}
           onToggleLike={handleToggleLike}
@@ -210,45 +462,59 @@ export default function App() {
         />
       )}
 
+      {/* Trailer */}
       {trailerModalMovie && (
         <TrailerModal
           movie={trailerModalMovie}
-          onClose={() => setTrailerModalMovie(null)}
+          onClose={() =>
+            setTrailerModalMovie(null)
+          }
         />
       )}
 
+      {/* Manual auth modal */}
       {isAuthModalOpen && (
         <AuthModal
-          onClose={() => setIsAuthModalOpen(false)}
-          onSuccess={(u) => {
-            setUser(u);
-            if (u.interactionCount === 0) {
-              setIsOnboardingModalOpen(true);
-            }
-          }}
+          onClose={() =>
+            setIsAuthModalOpen(false)
+          }
+          onSuccess={handleAuthenticationSuccess}
         />
       )}
 
+      {/* Onboarding */}
       {isOnboardingModalOpen && (
         <OnboardingModal
           isOpen={isOnboardingModalOpen}
-          onClose={() => setIsOnboardingModalOpen(false)}
+          onClose={() =>
+            setIsOnboardingModalOpen(false)
+          }
           onComplete={(updatedUser) => {
             setUser(updatedUser);
             setIsOnboardingModalOpen(false);
+
             if (updatedUser) {
-              localStorage.setItem(`cinemeta_onboarded_${updatedUser.id}`, 'true');
+              localStorage.setItem(
+                `cinemeta_onboarded_${updatedUser.id}`,
+                'true'
+              );
             }
+
             setCurrentView('recommendations');
           }}
         />
       )}
 
+      {/* AI assistant */}
       {isAiAssistantOpen && (
         <AiAssistantModal
           isOpen={isAiAssistantOpen}
-          onClose={() => setIsAiAssistantOpen(false)}
-          onSelectMovie={(movie) => setSelectedMovieModal(movie)}
+          onClose={() =>
+            setIsAiAssistantOpen(false)
+          }
+          onSelectMovie={(movie) =>
+            setSelectedMovieModal(movie)
+          }
         />
       )}
     </div>

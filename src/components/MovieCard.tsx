@@ -1,7 +1,13 @@
-import React, { useState } from 'react';
-import { Play, Bookmark, Star, Check, Sparkles, Info, ThumbsUp, HelpCircle } from 'lucide-react';
+﻿import React, { useState } from 'react';
+import {
+  Play,
+  Bookmark,
+  Star,
+  Check,
+  Info,
+  ChevronDown,
+} from 'lucide-react';
 import { Movie, RecommendationResult } from '../types';
-import { getImageUrl } from '../data/mockMovies';
 
 interface MovieCardProps {
   movie: Movie;
@@ -22,184 +28,195 @@ export const MovieCard: React.FC<MovieCardProps> = ({
   onOpenDetails,
   onPlayTrailer,
   onToggleWatchlist,
-  onRateMovie
+  onRateMovie,
 }) => {
-  const [showExplanation, setShowExplanation] = useState(false);
-  const posterUrl = getImageUrl(movie.poster_path, 'w500');
+  const [showWhy, setShowWhy] = useState(false);
+
+  const fallbackPoster =
+    'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?q=80&w=1000&auto=format&fit=crop';
+
+  const getPosterUrl = (posterPath?: string | null): string => {
+    if (!posterPath) return fallbackPoster;
+
+    if (
+      posterPath.startsWith('http://') ||
+      posterPath.startsWith('https://')
+    ) {
+      return posterPath;
+    }
+
+    if (posterPath.startsWith('/')) {
+      return `https://image.tmdb.org/t/p/w500${posterPath}`;
+    }
+
+    return fallbackPoster;
+  };
+
+  const posterUrl = getPosterUrl(movie.poster_path);
 
   const genresList = Array.isArray(movie.genres)
-    ? movie.genres.map(g => typeof g === 'string' ? g : g.name)
+    ? movie.genres.map((genre) =>
+        typeof genre === 'string' ? genre : genre.name
+      )
     : [];
 
+  const year = movie.release_date?.substring(0, 4) || '';
+
   return (
-    <div
-      className="relative group bg-zinc-900/80 border border-zinc-800/80 rounded-xl overflow-hidden shadow-lg transition-all duration-300 hover:scale-[1.03] hover:border-zinc-700 hover:shadow-2xl flex flex-col"
+    <article
+      className="group relative flex flex-col overflow-hidden rounded-xl border border-zinc-800/70 bg-zinc-900/55 transition-all duration-300 hover:-translate-y-1 hover:border-zinc-700 hover:bg-zinc-900"
       id={`movie-card-${movie.id}`}
     >
-      {/* Poster Image Container */}
-      <div className="relative aspect-[2/3] w-full overflow-hidden bg-zinc-950">
+      <div className="relative aspect-[2/3] overflow-hidden bg-zinc-950">
         <img
           src={posterUrl}
           alt={movie.title}
-          className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+          className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-[1.04]"
           loading="lazy"
+          onError={(event) => {
+            const img = event.currentTarget;
+
+            if (img.dataset.fallbackApplied !== 'true') {
+              img.dataset.fallbackApplied = 'true';
+              img.src = fallbackPoster;
+            }
+          }}
         />
 
-        {/* Top Badges */}
-        <div className="absolute top-2 left-2 right-2 flex items-center justify-between pointer-events-none z-20">
-          <div className="flex items-center gap-1">
-            {/* Recommendation Match Badge or TMDb Score */}
-            {recommendationDetails ? (
-              <div className="bg-red-600/95 text-white font-black text-[11px] px-2 py-0.5 rounded-full shadow-md flex items-center gap-1 border border-red-500/50">
-                <Sparkles className="w-3 h-3" />
-                {recommendationDetails.confidence_score}% MATCH
-              </div>
-            ) : (
-              <div className="bg-zinc-950/80 backdrop-blur-md text-amber-400 font-bold text-[11px] px-2 py-0.5 rounded-full border border-zinc-800 flex items-center gap-1">
-                <Star className="w-3 h-3 fill-amber-400 text-amber-400" />
-                {movie.vote_average.toFixed(1)}
-              </div>
-            )}
-
-            {/* Language Tag Badge */}
-            {movie.language && (
-              <div className="bg-zinc-950/80 backdrop-blur-md text-zinc-200 font-extrabold text-[10px] uppercase px-1.5 py-0.5 rounded border border-zinc-700/80">
-                {movie.language === 'kn' ? 'Kannada' : movie.language === 'ta' ? 'Tamil' : movie.language === 'te' ? 'Telugu' : movie.language === 'ml' ? 'Malayalam' : movie.language === 'hi' ? 'Hindi' : movie.language.toUpperCase()}
-              </div>
-            )}
+        <div className="absolute inset-x-0 top-0 flex items-start justify-between p-2.5">
+          <div className="rounded-md bg-black/65 px-2 py-1 text-[11px] font-semibold text-amber-300 backdrop-blur-sm">
+            ★ {movie.vote_average.toFixed(1)}
           </div>
 
-          {/* Quick Bookmark Button */}
           <button
-            onClick={(e) => {
-              e.stopPropagation();
+            onClick={(event) => {
+              event.stopPropagation();
               onToggleWatchlist(movie.id);
             }}
-            className={`pointer-events-auto p-1.5 rounded-full backdrop-blur-md transition-transform hover:scale-110 ${
+            className={`rounded-full p-2 backdrop-blur-sm transition-colors ${
               isInWatchlist
-                ? 'bg-emerald-600 text-white shadow-md'
-                : 'bg-zinc-950/80 text-zinc-300 hover:bg-zinc-800'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-black/60 text-zinc-200 hover:bg-black/80'
             }`}
-            title={isInWatchlist ? 'Remove from Library' : 'Add to Library'}
+            title={isInWatchlist ? 'Remove from My List' : 'Add to My List'}
           >
-            {isInWatchlist ? <Check className="w-3.5 h-3.5" /> : <Bookmark className="w-3.5 h-3.5" />}
+            {isInWatchlist ? (
+              <Check className="h-3.5 w-3.5" />
+            ) : (
+              <Bookmark className="h-3.5 w-3.5" />
+            )}
           </button>
         </div>
 
-        {/* Hover Action Overlay */}
-        <div className="absolute inset-0 bg-gradient-to-t from-zinc-950 via-zinc-950/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex flex-col justify-end p-4 z-10">
-          <div className="space-y-2 transform translate-y-2 group-hover:translate-y-0 transition-transform duration-300">
-            <h3 className="text-sm font-bold text-white leading-tight line-clamp-1">
-              {movie.title}
-            </h3>
+        <div className="absolute inset-0 flex items-end bg-gradient-to-t from-black via-black/30 to-transparent p-3 opacity-0 transition-opacity duration-300 group-hover:opacity-100">
+          <div className="w-full translate-y-2 space-y-2 transition-transform duration-300 group-hover:translate-y-0">
+            <div>
+              <h3 className="line-clamp-2 text-sm font-semibold text-white">
+                {movie.title}
+              </h3>
 
-            <div className="flex items-center gap-2 text-[11px] text-zinc-300">
-              <span>{movie.release_date?.substring(0, 4)}</span>
-              <span>•</span>
-              <span className="truncate">{genresList.slice(0, 2).join(', ')}</span>
+              <p className="mt-1 text-[11px] text-zinc-300">
+                {year}
+                {genresList.length > 0
+                  ? ` • ${genresList.slice(0, 2).join(', ')}`
+                  : ''}
+              </p>
             </div>
 
-            {/* Quick Star Rating */}
-            <div className="flex items-center justify-between pt-1 border-t border-zinc-800/80">
-              <span className="text-[10px] text-zinc-400">Your Rating:</span>
-              <div className="flex items-center gap-0.5">
-                {[1, 2, 3, 4, 5].map(star => (
-                  <button
-                    key={star}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRateMovie(movie.id, star);
-                    }}
-                    className={`p-0.5 ${
-                      (userRating || 0) >= star ? 'text-amber-400' : 'text-zinc-600 hover:text-amber-400'
-                    }`}
-                  >
-                    <Star className={`w-3 h-3 ${ (userRating || 0) >= star ? 'fill-amber-400' : '' }`} />
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Play Trailer & Details Buttons */}
-            <div className="flex items-center gap-2 pt-1">
+            <div className="flex gap-2">
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
+                onClick={(event) => {
+                  event.stopPropagation();
                   onPlayTrailer(movie);
                 }}
-                className="flex-1 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-semibold flex items-center justify-center gap-1 transition-colors shadow-md"
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-white py-2 text-xs font-semibold text-zinc-900 transition-colors hover:bg-zinc-200"
               >
-                <Play className="w-3 h-3 fill-white" />
+                <Play className="h-3.5 w-3.5 fill-current" />
                 Trailer
               </button>
+
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
+                onClick={(event) => {
+                  event.stopPropagation();
                   onOpenDetails(movie);
                 }}
-                className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 transition-colors"
-                title="View Full Details"
+                className="rounded-lg bg-zinc-900/85 p-2 text-zinc-100 transition-colors hover:bg-zinc-800"
+                title="More details"
               >
-                <Info className="w-3.5 h-3.5" />
+                <Info className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Card Footer Info */}
-      <div className="p-3 flex-1 flex flex-col justify-between space-y-1">
+      <div className="flex flex-1 flex-col justify-between gap-3 p-3">
         <div>
-          <h4
+          <button
             onClick={() => onOpenDetails(movie)}
-            className="text-xs font-bold text-zinc-100 hover:text-red-400 transition-colors cursor-pointer line-clamp-1"
+            className="line-clamp-1 text-left text-sm font-semibold text-zinc-100 transition-colors hover:text-red-400"
           >
             {movie.title}
-          </h4>
-          <p className="text-[11px] text-zinc-500 line-clamp-1">
+          </button>
+
+          <p className="mt-1 line-clamp-1 text-[11px] text-zinc-500">
             {genresList.slice(0, 2).join(' • ') || 'Movie'}
           </p>
         </div>
 
-        {/* AI Recommendation Explanation Section (If in recommendation mode) */}
-        {recommendationDetails && (
-          <div className="pt-1.5 border-t border-zinc-800/60 mt-1">
-            <div className="flex items-center justify-between text-[10px]">
-              <span className="text-zinc-400 font-mono flex items-center gap-1">
-                <Sparkles className="w-2.5 h-2.5 text-rose-500" />
-                {recommendationDetails.algorithm_used === 'content_based'
-                  ? 'Cold-Start CB'
-                  : recommendationDetails.algorithm_used === 'collaborative_filtering'
-                  ? 'Matrix SVD'
-                  : 'Meta-Hybrid'}
-              </span>
+        <div className="flex items-center justify-between border-t border-zinc-800/70 pt-2">
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-zinc-500">Your rating</span>
 
+            {[1, 2, 3, 4, 5].map((star) => (
               <button
-                onClick={() => setShowExplanation(!showExplanation)}
-                className="text-red-400 hover:text-red-300 font-semibold flex items-center gap-0.5"
+                key={star}
+                onClick={() => onRateMovie(movie.id, star)}
+                className="p-0.5 text-zinc-600 transition-colors hover:text-amber-400"
+                title={`Rate ${star} out of 5`}
               >
-                Why? <HelpCircle className="w-2.5 h-2.5" />
+                <Star
+                  className={`h-3 w-3 ${
+                    (userRating || 0) >= star
+                      ? 'fill-amber-400 text-amber-400'
+                      : ''
+                  }`}
+                />
               </button>
-            </div>
+            ))}
+          </div>
 
-            {/* Explanation Drawer */}
-            {showExplanation && (
-              <div className="mt-1.5 p-2 rounded-lg bg-zinc-950 border border-zinc-800 text-[10px] text-zinc-300 leading-snug space-y-1 animate-fadeIn">
-                <p className="font-semibold text-rose-400">
-                  {recommendationDetails.explanation}
-                </p>
-                {recommendationDetails.matched_reasons.length > 0 && (
-                  <ul className="list-disc list-inside text-zinc-400 space-y-0.5 pl-1">
-                    {recommendationDetails.matched_reasons.map((reason, idx) => (
-                      <li key={idx} className="line-clamp-1">{reason}</li>
-                    ))}
-                  </ul>
-                )}
-              </div>
+          {recommendationDetails && (
+            <button
+              onClick={() => setShowWhy((value) => !value)}
+              className="flex items-center gap-1 text-[10px] font-medium text-zinc-400 transition-colors hover:text-white"
+            >
+              Why this pick?
+              <ChevronDown
+                className={`h-3 w-3 transition-transform ${
+                  showWhy ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+          )}
+        </div>
+
+        {recommendationDetails && showWhy && (
+          <div className="animate-fadeIn rounded-lg bg-zinc-950/70 p-2.5 text-[10px] leading-relaxed text-zinc-400">
+            <p className="font-medium text-zinc-200">
+              {recommendationDetails.explanation}
+            </p>
+
+            {recommendationDetails.matched_reasons.length > 0 && (
+              <p className="mt-1 text-zinc-500">
+                {recommendationDetails.matched_reasons
+                  .slice(0, 2)
+                  .join(' • ')}
+              </p>
             )}
           </div>
         )}
       </div>
-    </div>
+    </article>
   );
 };
