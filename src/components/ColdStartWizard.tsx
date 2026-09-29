@@ -16,8 +16,6 @@ import {
   Plus,
   Film,
   Sliders,
-  Compass,
-  Zap
 } from 'lucide-react';
 import { Movie, RecommendationResult, UserProfile } from '../types';
 import { api } from '../services/api';
@@ -51,10 +49,7 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
   const [interactionCount, setInteractionCount] = useState<number>(0);
   const [isLoading, setIsLoading] = useState(false);
 
-  // Advanced Tuning Controls
-  const [diversityLambda, setDiversityLambda] = useState<number>(0.75);
   const [showSimulator, setShowSimulator] = useState<boolean>(false);
-  const [nlpQuery, setNlpQuery] = useState<string>('');
 
   // Global Dataset Search State
   const [searchQuery, setSearchQuery] = useState('');
@@ -130,20 +125,14 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
   const handleRunRecommendation = async () => {
     setIsLoading(true);
     try {
-      if (nlpQuery.trim()) {
-        const res = await api.nlpSearch(nlpQuery, diversityLambda);
-        setRecommendations(res.recommendations);
-        setAlgorithmUsed('nlp_semantic_hybrid');
-      } else {
-        const res = await api.generateRecommendations({
-          selectedMovieIds,
-          selectedMovies: selectedMoviesList,
-          diversityLambda
-        });
-        setRecommendations(res.recommendations);
-        setAlgorithmUsed(res.algorithmUsed);
-        setInteractionCount(res.interactionCount);
-      }
+      const res = await api.generateRecommendations({
+        selectedMovieIds,
+        selectedMovies: selectedMoviesList
+      });
+
+      setRecommendations(res.recommendations);
+      setAlgorithmUsed(res.algorithmUsed);
+      setInteractionCount(res.interactionCount);
     } catch (err) {
       console.error('Recommendation generation error:', err);
     } finally {
@@ -168,54 +157,53 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
 
   return (
     <div className="space-y-8 max-w-7xl mx-auto px-4 sm:px-6 py-6 animate-fadeIn">
-      {/* Header Banner */}
-      <div className="relative rounded-2xl bg-gradient-to-r from-zinc-900 via-zinc-950 to-red-950/40 p-6 md:p-8 border border-zinc-800 shadow-2xl overflow-hidden">
-        <div className="absolute top-0 right-0 w-96 h-96 bg-red-600/10 rounded-full blur-3xl pointer-events-none" />
+      {/* Header */}
+      <div className="relative rounded-2xl bg-zinc-950 border border-zinc-800 shadow-xl overflow-hidden">
+        <div className="h-1 bg-red-600" />
 
-        <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-          <div className="space-y-2 max-w-3xl">
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="px-3 py-1 rounded-full text-xs font-black tracking-wider bg-red-600 text-white uppercase shadow-md flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5" />
-                RECOMMENDED FOR YOU
+        <div className="relative z-10 flex flex-col lg:flex-row lg:items-center lg:justify-between gap-5 p-6 md:p-7">
+          <div className="max-w-3xl">
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-red-600 text-white text-[11px] font-bold uppercase tracking-wide">
+                <Sparkles className="w-3 h-3" />
+                Picks for you
               </span>
-              <span className="text-xs text-zinc-400 font-mono bg-zinc-900 px-3 py-1 rounded-full border border-zinc-800">
-                Algorithm: {algorithmUsed}
-              </span>
-              <span className="text-xs text-zinc-400 font-mono bg-zinc-900 px-3 py-1 rounded-full border border-zinc-800">
-                Active Seeds: {selectedMovieIds.length}
-              </span>
+              {selectedMovieIds.length > 0 && (
+                <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-zinc-900 border border-zinc-800 text-zinc-400 text-[11px] font-medium">
+                  {selectedMovieIds.length} favourite{selectedMovieIds.length === 1 ? '' : 's'} selected
+                </span>
+              )}
             </div>
 
-            <h1 className="text-2xl sm:text-4xl font-extrabold text-white tracking-tight">
-              AI Recommendation
+            <h1 className="text-2xl sm:text-4xl font-bold text-white tracking-tight">
+              Find something you’ll love
             </h1>
-            <p className="text-xs sm:text-sm text-zinc-300 leading-relaxed">
-              Real-time meta-learning hybrid recommendation model combining TF-IDF content similarity, SVD collaborative vectors, and Maximum Marginal Relevance (MMR) diversity optimization.
+            <p className="mt-2 text-sm text-zinc-400 leading-relaxed max-w-2xl">
+              Pick a few favourites and we’ll build a personalised list of movies to explore.
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             {onOpenOnboarding && (
               <button
                 onClick={onOpenOnboarding}
-                className="px-4 py-2.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 text-rose-300 text-xs font-bold flex items-center gap-2 transition-all shadow"
+                className="px-4 py-2.5 rounded-lg bg-red-600 hover:bg-red-500 text-white text-xs font-semibold flex items-center gap-2 transition-colors"
               >
-                <Sliders className="w-4 h-4 text-red-400" />
-                Cold-Start Wizard
+                <Sliders className="w-4 h-4" />
+                Tune my picks
               </button>
             )}
 
             <button
               onClick={() => setShowSimulator(!showSimulator)}
-              className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-2 transition-all border ${
+              className={`px-4 py-2.5 rounded-lg text-xs font-semibold flex items-center gap-2 transition-colors border ${
                 showSimulator
-                  ? 'bg-amber-600 text-white border-amber-500 shadow-lg shadow-amber-900/30'
-                  : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-300 border-zinc-800'
+                  ? 'bg-zinc-100 text-zinc-900 border-zinc-100'
+                  : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-200 border-zinc-700'
               }`}
             >
-              <Cpu className="w-4 h-4 text-amber-400" />
-              {showSimulator ? 'Hide Simulator' : 'Simulate Cold-Start Stages'}
+              <Info className="w-4 h-4" />
+              {showSimulator ? 'Close how it works' : 'How it works'}
             </button>
           </div>
         </div>
@@ -225,67 +213,6 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
       {showSimulator && (
         <ColdStartStageDemo onSelectMovie={onOpenDetails} />
       )}
-
-      {/* Diversity & Natural Language Query Control Strip */}
-      <div className="p-5 rounded-2xl bg-zinc-900/90 border border-zinc-800 shadow-lg space-y-4">
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
-          
-          {/* Natural Language Prompt Query Input */}
-          <div className="md:col-span-7 space-y-1.5">
-            <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-              <Compass className="w-3.5 h-3.5 text-rose-500" />
-              Natural Language Intent Query (Optional)
-            </label>
-            <div className="relative">
-              <input
-                type="text"
-                placeholder="e.g. 'Mind-bending sci-fi with dark psychological themes' or 'Relaxing comedy'"
-                value={nlpQuery}
-                onChange={e => setNlpQuery(e.target.value)}
-                className="w-full bg-zinc-950 border border-zinc-800 text-xs rounded-xl px-3 py-2.5 text-zinc-200 focus:outline-none focus:border-red-600 focus:ring-1 focus:ring-red-600/50 transition-all placeholder:text-zinc-500"
-              />
-              {nlpQuery && (
-                <button
-                  onClick={() => {
-                    setNlpQuery('');
-                    handleRunRecommendation();
-                  }}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-white"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          </div>
-
-          {/* MMR Diversity Lambda Slider */}
-          <div className="md:col-span-5 space-y-1.5 bg-zinc-950 p-3 rounded-xl border border-zinc-800/80">
-            <div className="flex items-center justify-between text-xs font-semibold">
-              <span className="text-zinc-300 flex items-center gap-1">
-                <Zap className="w-3.5 h-3.5 text-amber-400" />
-                MMR Diversity (Î» = {diversityLambda.toFixed(2)})
-              </span>
-              <span className="text-[10px] text-zinc-500 font-mono">
-                {diversityLambda > 0.8 ? 'Max Relevance' : diversityLambda < 0.4 ? 'High Serendipity' : 'Balanced'}
-              </span>
-            </div>
-            <input
-              type="range"
-              min="0.1"
-              max="0.95"
-              step="0.05"
-              value={diversityLambda}
-              onChange={e => setDiversityLambda(parseFloat(e.target.value))}
-              className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-red-600"
-            />
-            <div className="flex justify-between text-[10px] text-zinc-500">
-              <span>Novelty & Exploration</span>
-              <span>Exact Content Match</span>
-            </div>
-          </div>
-
-        </div>
-      </div>
 
       {/* Main Grid: Left = Global Dataset Movie Search & Seed Picker, Right = Recommendations Output */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
@@ -372,7 +299,7 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
                     <div className="flex-1 min-w-0">
                       <h4 className="text-xs font-bold text-zinc-100 truncate">{movie.title}</h4>
                       <p className="text-[10px] text-zinc-400 truncate">
-                        {movie.release_date?.substring(0, 4)} â€¢ {Array.isArray(movie.genres) ? movie.genres.slice(0, 2).map(g => typeof g === 'string' ? g : g.name).join(', ') : ''}
+                        {movie.release_date?.substring(0, 4)} • {Array.isArray(movie.genres) ? movie.genres.slice(0, 2).map(g => typeof g === 'string' ? g : g.name).join(', ') : ''}
                       </p>
                       <span className="text-[10px] text-amber-400 font-bold">
                         â˜… {movie.vote_average ? movie.vote_average.toFixed(1) : '7.5'}
@@ -425,7 +352,7 @@ export const ColdStartWizard: React.FC<ColdStartWizardProps> = ({
                       }}
                       className="text-zinc-500 hover:text-white font-bold text-xs bg-zinc-900 rounded-full w-4 h-4 flex items-center justify-center"
                     >
-                      Ã—
+                      ×
                     </button>
                   </span>
                 ))}

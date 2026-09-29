@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Movie, UserProfile, OnboardingPreferences } from '../types';
-import { api } from '../services/api';
+
 import {
   Film,
   Sparkles,
@@ -12,11 +11,21 @@ import {
   Compass,
   Star,
   Clock,
+  Play,
   Calendar,
   Smile,
   Zap,
+  Heart,
   X
 } from 'lucide-react';
+
+import {
+  Movie,
+  UserProfile,
+  OnboardingPreferences
+} from '../types';
+
+import { api } from '../services/api';
 
 interface OnboardingModalProps {
   user: UserProfile | null;
@@ -86,6 +95,16 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [isLoadingMovies, setIsLoadingMovies] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
+  // Live search suggestions shown while typing in the Step 1 search box.
+  const [searchSuggestions, setSearchSuggestions] = useState<Movie[]>([]);
+  const [showSearchSuggestions, setShowSearchSuggestions] = useState<boolean>(false);
+  const [isSearchingSuggestions, setIsSearchingSuggestions] = useState<boolean>(false);
+
+  // Track movie posters that fail to load so broken cards are removed from the picker.
+  const [brokenPosterIds, setBrokenPosterIds] = useState<Set<number>>(
+    () => new Set<number>()
+  );
+
   // Step 1 State: Selected Movies (~5)
   const [selectedMovies, setSelectedMovies] = useState<Movie[]>([]);
 
@@ -105,13 +124,25 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
   const [generatedRecs, setGeneratedRecs] = useState<any[]>([]);
   const [isGeneratingRecs, setIsGeneratingRecs] = useState<boolean>(false);
 
+  // Media state for Step 5 preview.
+  // Recommendation candidates can come from different sources, so we
+  // enrich them with fresh TMDB details and trailer data before rendering.
+  const [recommendationTrailers, setRecommendationTrailers] = useState<Record<number, string>>({});
+  const [brokenRecommendationPosterIds, setBrokenRecommendationPosterIds] = useState<Set<number>>(
+    () => new Set<number>()
+  );
+  const [activeTrailer, setActiveTrailer] = useState<{ title: string; url: string } | null>(null);
+
   // Fetch initial popular movies for Step 1
   useEffect(() => {
     if (isOpen && catalogMovies.length === 0) {
       setIsLoadingMovies(true);
       api.getPopularMovies()
         .then(movies => {
-          setCatalogMovies(movies);
+          setBrokenPosterIds(new Set());
+          setCatalogMovies(
+            movies.filter(movie => Boolean(movie.poster_path))
+          );
           setIsLoadingMovies(false);
         })
         .catch(err => {
@@ -121,19 +152,90 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
     }
   }, [isOpen]);
 
+  // Debounced live search for autocomplete suggestions.
+  useEffect(() => {
+    const query = searchQuery.trim();
+
+    if (!isOpen || step !== 1 || query.length < 2) {
+      setSearchSuggestions([]);
+      setShowSearchSuggestions(false);
+      setIsSearchingSuggestions(false);
+      return;
+    }
+
+    let cancelled = false;
+
+    const timer = window.setTimeout(async () => {
+      setIsSearchingSuggestions(true);
+
+      try {
+        const results = await api.searchMovies(query);
+
+        if (cancelled) return;
+
+        const validResults = results
+          .filter(movie => Boolean(movie.poster_path))
+          .slice(0, 6);
+
+        setSearchSuggestions(validResults);
+        setShowSearchSuggestions(true);
+      } catch (err) {
+        if (!cancelled) {
+          console.error('Autocomplete search error:', err);
+          setSearchSuggestions([]);
+          setShowSearchSuggestions(false);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsSearchingSuggestions(false);
+        }
+      }
+    }, 300);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [searchQuery, isOpen, step]);
+
   if (!isOpen) return null;
+
+  const handleSuggestionSelect = (movie: Movie) => {
+    setSearchQuery(movie.title);
+    setCatalogMovies([movie]);
+    setBrokenPosterIds(prev => {
+      const next = new Set(prev);
+      next.delete(movie.id);
+      return next;
+    });
+    setSearchSuggestions([]);
+    setShowSearchSuggestions(false);
+  };
 
   const handleMovieSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!searchQuery.trim()) {
-      const pop = await api.getPopularMovies();
-      setCatalogMovies(pop);
+      setIsLoadingMovies(true);
+      try {
+        const pop = await api.getPopularMovies();
+        setBrokenPosterIds(new Set());
+        setCatalogMovies(
+          pop.filter(movie => Boolean(movie.poster_path))
+        );
+      } catch (err) {
+        console.error('Failed to load popular movies:', err);
+      } finally {
+        setIsLoadingMovies(false);
+      }
       return;
     }
     setIsLoadingMovies(true);
     try {
       const results = await api.searchMovies(searchQuery);
-      setCatalogMovies(results);
+      setBrokenPosterIds(new Set());
+      setCatalogMovies(
+        results.filter(movie => Boolean(movie.poster_path))
+      );
     } catch (err) {
       console.error('Search error:', err);
     } finally {
@@ -191,9 +293,94 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
       const res = await api.generateRecommendations({
         selectedMovieIds: selectedMovies.map(m => m.id),
-        selectedMovies
+        selectedMovies,
+        // Pass the current onboarding choices to the preview engine.
+        // These values have not been saved to the user yet at Step 5.
+        preferredLanguages: selectedLanguages,
+        favoriteGenres: selectedGenres,
+        preferences
       });
-      setGeneratedRecs(res.recommendations || []);
+
+      const rawRecommendations = (res.recommendations || []).slice(0, 8);
+      setBrokenRecommendationPosterIds(new Set());
+      setRecommendationTrailers({});
+
+      // Refresh media for the preview cards. This fixes cases where a
+      // recommender candidate exists in the database but its cached movie
+      // object is missing poster/trailer metadata.
+      const enrichedRecommendations = await Promise.all(
+        rawRecommendations.map(async (rec: any) => {
+          let movie = rec.movie;
+
+          try {
+            const details = await api.getMovieDetails(movie.id);
+            if (details) {
+              movie = { ...movie, ...details };
+            }
+          } catch (detailsError) {
+            console.warn(`Could not refresh details for movie ${movie.id}:`, detailsError);
+          }
+
+          // Some recommendation candidates come from the local catalog with
+          // incomplete metadata. Search TMDB again by title when a poster is
+          // still missing so the Step 5 preview can always show a real poster.
+          if (!movie.poster_path) {
+            try {
+              const searchResults = await api.searchMovies(movie.title);
+              const posterMatch = searchResults.find(result => Boolean(result.poster_path));
+
+              if (posterMatch) {
+                movie = {
+                  ...movie,
+                  ...posterMatch,
+                  // Keep the recommendation score/explanation outside the movie object.
+                  id: movie.id
+                };
+              }
+            } catch (posterSearchError) {
+              console.warn(`Could not recover poster for movie ${movie.id}:`, posterSearchError);
+            }
+          }
+
+          let trailerUrl: string | null = null;
+
+          // Prefer the trailer key already attached to the movie.
+          if (movie.trailer_key) {
+            trailerUrl = `https://www.youtube-nocookie.com/embed/${movie.trailer_key}?autoplay=1&rel=0&modestbranding=1`;
+          }
+
+          try {
+            const trailer = await api.getMovieTrailer(movie.id);
+
+            // The backend can return either a direct YouTube key or an
+            // embed/search URL. Use videoUrl directly instead of trying to
+            // parse a normal ?v= URL, because the fallback uses listType=search.
+            if (trailer?.trailerKey) {
+              trailerUrl = `https://www.youtube-nocookie.com/embed/${trailer.trailerKey}?autoplay=1&rel=0&modestbranding=1`;
+            } else if (trailer?.videoUrl) {
+              trailerUrl = trailer.videoUrl;
+            }
+          } catch (trailerError) {
+            console.warn(`Could not load trailer for movie ${movie.id}:`, trailerError);
+          }
+
+          return {
+            ...rec,
+            movie,
+            trailerUrl
+          };
+        })
+      );
+
+      const trailerMap: Record<number, string> = {};
+      enrichedRecommendations.forEach((rec: any) => {
+        if (rec.trailerUrl) {
+          trailerMap[rec.movie.id] = rec.trailerUrl;
+        }
+      });
+
+      setRecommendationTrailers(trailerMap);
+      setGeneratedRecs(enrichedRecommendations);
     } catch (err) {
       console.error('Error generating preview:', err);
     } finally {
@@ -231,46 +418,62 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md overflow-y-auto">
-      <div className="relative w-full max-w-4xl bg-zinc-900 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden my-6">
+      <div className="relative w-full max-w-4xl bg-zinc-900 border border-zinc-800 rounded-xl shadow-2xl overflow-hidden my-6">
         
-        {/* Header Bar */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-950/80">
-          <div className="flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-red-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-red-600/20">
-              <Sparkles className="w-5 h-5" />
+        {/* Header */}
+        <div className="px-7 pt-5 pb-4 bg-zinc-950 border-b border-zinc-800">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="mt-0.5 w-10 h-10 rounded-xl bg-red-600 flex items-center justify-center text-white shadow-sm">
+                <Film className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2.5 flex-wrap">
+                  <h2 className="text-[17px] font-semibold text-white tracking-tight">
+                    Personalize your movie picks
+                  </h2>
+                  <span className="text-[11px] font-semibold text-zinc-300 bg-zinc-800 px-2 py-0.5 rounded-md border border-zinc-700">
+                    {step} of 5
+                  </span>
+                </div>
+                <p className="text-xs text-zinc-400 mt-1">
+                  A few quick choices and we'll tailor your recommendations.
+                </p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-lg font-bold text-white tracking-wide flex items-center gap-2">
-                Cold-Start Preference Calibration
-                <span className="text-xs px-2 py-0.5 rounded-full bg-red-600/20 text-red-400 border border-red-500/30 font-medium">
-                  Step {step} of 5
-                </span>
-              </h2>
-              <p className="text-xs text-zinc-400">
-                Personalize your meta-learning recommendation vector in 60 seconds
-              </p>
-            </div>
+
+            <button
+              onClick={onClose}
+              className="p-1.5 -mr-1 rounded-lg text-zinc-500 hover:text-white hover:bg-zinc-900 transition-colors"
+              title="Close"
+              aria-label="Close onboarding"
+            >
+              <X className="w-5 h-5" />
+            </button>
           </div>
 
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
-            title="Skip onboarding for now"
-          >
-            <X className="w-5 h-5" />
-          </button>
-        </div>
-
-        {/* Stepper Progress Bar */}
-        <div className="w-full bg-zinc-800 h-1">
-          <div
-            className="bg-gradient-to-r from-red-600 to-amber-500 h-1 transition-all duration-300 ease-out"
-            style={{ width: `${(step / 5) * 100}%` }}
-          />
+          <div className="mt-4 flex items-center gap-1.5">
+            {Array.from({ length: 5 }).map((_, index) => {
+              const active = index + 1 <= step;
+              const current = index + 1 === step;
+              return (
+                <div key={index} className="flex-1 flex items-center gap-1.5">
+                  <div
+                    className={`h-1.5 w-full rounded-full transition-colors ${
+                      active ? 'bg-red-600' : 'bg-zinc-800'
+                    }`}
+                  />
+                  {current && (
+                    <span className="sr-only">Current step {step}</span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {/* Step Content Container */}
-        <div className="p-6 max-h-[70vh] overflow-y-auto">
+        <div className="px-7 py-6 max-h-[70vh] overflow-y-auto">
 
           {/* STEP 1: FAVORITE MOVIES */}
           {step === 1 && (
@@ -279,38 +482,106 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 <div>
                   <h3 className="text-base font-bold text-white flex items-center gap-2">
                     <Film className="w-4 h-4 text-red-500" />
-                    Step 1: Select 3 to 5 Movies You Love
+                    Pick a few movies you really like
                   </h3>
                   <p className="text-xs text-zinc-400 mt-0.5">
-                    These seed movies provide initial feature weights for storylines, genres, and directors.
+                    Choose 3–5 favorites so we can understand the kind of movies you enjoy.
                   </p>
                 </div>
 
                 <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700 text-xs font-semibold text-zinc-300">
-                  <span>Selected:</span>
+                  <span>Selected</span>
                   <span className={`px-2 py-0.5 rounded-md ${selectedMovies.length >= 3 ? 'bg-emerald-600 text-white' : 'bg-red-600/30 text-red-300'}`}>
-                    {selectedMovies.length} / 5 recommended
+                    {selectedMovies.length} / 5
                   </span>
                 </div>
               </div>
 
               {/* Search Bar */}
-              <form onSubmit={handleMovieSearch} className="relative">
-                <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
-                <input
-                  type="text"
-                  placeholder="Search by title (e.g., Interstellar, Kantara, RRR, Inception, Dune)..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full pl-10 pr-24 py-2.5 bg-zinc-950 border border-zinc-700 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500"
-                />
-                <button
-                  type="submit"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 rounded-lg transition-colors"
-                >
-                  Search
-                </button>
-              </form>
+              <div className="relative z-30">
+                <form onSubmit={handleMovieSearch} className="relative">
+                  <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-400" />
+                  <input
+                    type="text"
+                    placeholder="Search by title (e.g., Interstellar, Kantara, RRR, Inception, Dune)..."
+                    value={searchQuery}
+                    onChange={(e) => {
+                      setSearchQuery(e.target.value);
+                      if (e.target.value.trim().length >= 2) {
+                        setShowSearchSuggestions(true);
+                      } else {
+                        setShowSearchSuggestions(false);
+                      }
+                    }}
+                    onFocus={() => {
+                      if (searchQuery.trim().length >= 2 && searchSuggestions.length > 0) {
+                        setShowSearchSuggestions(true);
+                      }
+                    }}
+                    onBlur={() => {
+                      window.setTimeout(() => setShowSearchSuggestions(false), 150);
+                    }}
+                    autoComplete="off"
+                    className="w-full pl-10 pr-24 py-2.5 bg-zinc-950 border border-zinc-700 rounded-xl text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500"
+                  />
+                  <button
+                    type="submit"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-xs font-medium text-zinc-200 rounded-lg transition-colors"
+                  >
+                    Search
+                  </button>
+                </form>
+
+                {showSearchSuggestions && searchQuery.trim().length >= 2 && (
+                  <div className="absolute left-0 right-0 top-full mt-2 rounded-xl border border-zinc-700 bg-zinc-950 shadow-2xl overflow-hidden">
+                    {isSearchingSuggestions ? (
+                      <div className="px-4 py-3 text-xs text-zinc-400 flex items-center gap-2">
+                        <span className="w-3 h-3 border-2 border-zinc-500 border-t-transparent rounded-full animate-spin" />
+                        Searching movies...
+                      </div>
+                    ) : searchSuggestions.length > 0 ? (
+                      <div className="py-1">
+                        {searchSuggestions.map(movie => (
+                          <button
+                            key={movie.id}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              handleSuggestionSelect(movie);
+                            }}
+                            className="w-full px-3 py-2.5 flex items-center gap-3 text-left hover:bg-zinc-800 transition-colors"
+                          >
+                            <img
+                              src={
+                                movie.poster_path!.startsWith('http')
+                                  ? movie.poster_path!
+                                  : `https://image.tmdb.org/t/p/w92${movie.poster_path}`
+                              }
+                              alt={movie.title}
+                              className="w-8 h-12 rounded object-cover bg-zinc-800 flex-shrink-0"
+                              onError={(e) => {
+                                e.currentTarget.style.display = 'none';
+                              }}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <p className="text-sm font-semibold text-white truncate">{movie.title}</p>
+                              <p className="text-[11px] text-zinc-500">
+                                {movie.release_date?.substring(0, 4) || 'Release year unavailable'}
+                                {movie.vote_average ? ` · ★ ${movie.vote_average.toFixed(1)}` : ''}
+                              </p>
+                            </div>
+                            <ChevronRight className="w-4 h-4 text-zinc-600 flex-shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="px-4 py-3 text-xs text-zinc-500">
+                        No matching movies found.
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
 
               {/* Movie Grid */}
               {isLoadingMovies ? (
@@ -321,7 +592,20 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 gap-3">
-                  {catalogMovies.slice(0, 15).map(movie => {
+                  {catalogMovies.filter(movie => !brokenPosterIds.has(movie.id)).length === 0 ? (
+                    <div className="col-span-full py-10 text-center">
+                      <p className="text-sm text-zinc-400">
+                        No movies with valid posters were found.
+                      </p>
+                      <p className="text-xs text-zinc-600 mt-1">
+                        Try searching for another movie.
+                      </p>
+                    </div>
+                  ) : (
+                    catalogMovies
+                      .filter(movie => !brokenPosterIds.has(movie.id))
+                      .slice(0, 15)
+                      .map(movie => {
                     const isSelected = selectedMovies.some(m => m.id === movie.id);
                     return (
                       <div
@@ -334,10 +618,21 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         }`}
                       >
                         <img
-                          src={movie.poster_path ? (movie.poster_path.startsWith('http') ? movie.poster_path : `https://image.tmdb.org/t/p/w500${movie.poster_path}`) : '/placeholder-poster.jpg'}
+                          src={
+                            movie.poster_path.startsWith('http')
+                              ? movie.poster_path
+                              : `https://image.tmdb.org/t/p/w500${movie.poster_path}`
+                          }
                           alt={movie.title}
                           className="w-full h-full object-cover"
                           loading="lazy"
+                          onError={() => {
+                            setBrokenPosterIds(prev => {
+                              const next = new Set(prev);
+                              next.add(movie.id);
+                              return next;
+                            });
+                          }}
                         />
                         
                         {/* Overlay */}
@@ -366,7 +661,8 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         )}
                       </div>
                     );
-                  })}
+                  })
+                  )}
                 </div>
               )}
             </div>
@@ -375,17 +671,29 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           {/* STEP 2: FAVORITE GENRES */}
           {step === 2 && (
             <div className="space-y-6">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Compass className="w-4 h-4 text-red-500" />
-                  Step 2: Choose Your Favorite Genres
-                </h3>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  Select 2 or more genres to build initial affinity clusters in the preference vector.
-                </p>
+              <div className="flex items-end justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-red-400 text-[11px] font-semibold uppercase tracking-[0.16em]">
+                    <Compass className="w-3.5 h-3.5" />
+                    Your taste
+                  </div>
+                  <h3 className="mt-2 text-xl font-semibold tracking-tight text-white">
+                    What do you usually enjoy?
+                  </h3>
+                  <p className="text-sm text-zinc-400 mt-1 max-w-xl">
+                    Pick the genres you naturally reach for. Choose at least 2.
+                  </p>
+                </div>
+
+                <div className="shrink-0 text-right">
+                  <div className="text-[11px] text-zinc-500">Selected</div>
+                  <div className="text-sm font-semibold text-white mt-0.5">
+                    {selectedGenres.length} genres
+                  </div>
+                </div>
               </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2.5">
                 {AVAILABLE_GENRES.map(genre => {
                   const isSelected = selectedGenres.includes(genre);
                   return (
@@ -393,18 +701,22 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       key={genre}
                       type="button"
                       onClick={() => toggleGenre(genre)}
-                      className={`p-3.5 rounded-xl border text-left flex items-center justify-between transition-all ${
+                      className={`min-h-[50px] px-4 rounded-lg border text-left flex items-center justify-between transition-all duration-150 ${
                         isSelected
-                          ? 'bg-red-950/40 border-red-500 text-white shadow-lg shadow-red-900/20 ring-1 ring-red-500/40'
-                          : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900'
+                          ? 'bg-white border-white text-zinc-950 shadow-sm'
+                          : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-900'
                       }`}
                     >
-                      <span className="text-sm font-semibold">{genre}</span>
-                      <div className={`w-5 h-5 rounded-md flex items-center justify-center text-xs ${
-                        isSelected ? 'bg-red-600 text-white' : 'bg-zinc-800 text-zinc-500'
-                      }`}>
-                        {isSelected ? <Check className="w-3 h-3" /> : '+'}
-                      </div>
+                      <span className="text-sm font-medium">{genre}</span>
+                      <span
+                        className={`w-5 h-5 rounded-full flex items-center justify-center ${
+                          isSelected
+                            ? 'bg-zinc-950 text-white'
+                            : 'border border-zinc-700 text-zinc-600'
+                        }`}
+                      >
+                        {isSelected ? <Check className="w-3 h-3" /> : <span className="w-1.5 h-1.5 rounded-full bg-zinc-700" />}
+                      </span>
                     </button>
                   );
                 })}
@@ -415,17 +727,29 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           {/* STEP 3: PREFERRED LANGUAGES */}
           {step === 3 && (
             <div className="space-y-6">
-              <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Film className="w-4 h-4 text-red-500" />
-                  Step 3: Preferred Cinema Languages
-                </h3>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  Multi-language support for regional cinema (Kannada, Hindi, Telugu, Tamil, Malayalam) and Global releases.
-                </p>
+              <div className="flex items-end justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-red-400 text-[11px] font-semibold uppercase tracking-[0.16em]">
+                    <Film className="w-3.5 h-3.5" />
+                    What you watch
+                  </div>
+                  <h3 className="mt-2 text-xl font-semibold tracking-tight text-white">
+                    Which languages should we include?
+                  </h3>
+                  <p className="text-sm text-zinc-400 mt-1 max-w-xl">
+                    We'll keep recommendations within the languages you select.
+                  </p>
+                </div>
+
+                <div className="shrink-0 text-right">
+                  <div className="text-[11px] text-zinc-500">Selected</div>
+                  <div className="text-sm font-semibold text-white mt-0.5">
+                    {selectedLanguages.length} {selectedLanguages.length === 1 ? 'language' : 'languages'}
+                  </div>
+                </div>
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
                 {AVAILABLE_LANGUAGES.map(lang => {
                   const isSelected = selectedLanguages.includes(lang.code);
                   return (
@@ -433,21 +757,23 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                       key={lang.code}
                       type="button"
                       onClick={() => toggleLanguage(lang.code)}
-                      className={`p-3.5 rounded-xl border text-left flex items-center justify-between transition-all ${
+                      className={`min-h-[64px] px-4 rounded-lg border text-left flex items-center justify-between transition-all duration-150 ${
                         isSelected
-                          ? 'bg-red-950/40 border-red-500 text-white shadow-lg shadow-red-900/20 ring-1 ring-red-500/40'
-                          : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-700 hover:bg-zinc-900'
+                          ? 'bg-white border-white text-zinc-950 shadow-sm'
+                          : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-900'
                       }`}
                     >
                       <div>
-                        <p className="text-sm font-bold text-white">{lang.name}</p>
-                        <p className="text-xs text-zinc-400">{lang.native}</p>
+                        <p className="text-sm font-semibold">{lang.name}</p>
+                        <p className={`text-xs mt-0.5 ${isSelected ? 'text-zinc-600' : 'text-zinc-500'}`}>{lang.native}</p>
                       </div>
-                      <div className={`w-5 h-5 rounded-md flex items-center justify-center text-xs ${
-                        isSelected ? 'bg-red-600 text-white' : 'bg-zinc-800 text-zinc-500'
-                      }`}>
-                        {isSelected ? <Check className="w-3 h-3" /> : '+'}
-                      </div>
+                      <span
+                        className={`w-5 h-5 rounded-full flex items-center justify-center ${
+                          isSelected ? 'bg-zinc-950 text-white' : 'border border-zinc-700 text-zinc-600'
+                        }`}
+                      >
+                        {isSelected ? <Check className="w-3 h-3" /> : <span className="w-1.5 h-1.5 rounded-full bg-zinc-700" />}
+                      </span>
                     </button>
                   );
                 })}
@@ -457,24 +783,30 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
           {/* STEP 4: MOVIE PREFERENCES & MOOD */}
           {step === 4 && (
-            <div className="space-y-6">
+            <div className="space-y-7">
               <div>
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Sliders className="w-4 h-4 text-red-500" />
-                  Step 4: Movie Experience & Mood Preferences
+                <div className="flex items-center gap-2 text-red-400 text-[11px] font-semibold uppercase tracking-[0.16em]">
+                  <Heart className="w-3.5 h-3.5" />
+                  One last thing
+                </div>
+                <h3 className="mt-2 text-xl font-semibold tracking-tight text-white">
+                  How do you like to watch?
                 </h3>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  Fine-tune decade horizons, minimum quality rating, runtime ceilings, and psychological moods.
+                <p className="text-sm text-zinc-400 mt-1 max-w-xl">
+                  Tell us the mood, era and pace that usually make a movie worth your time.
                 </p>
               </div>
 
-              {/* Mood Selection */}
               <div>
-                <label className="text-xs font-bold text-zinc-300 uppercase tracking-wider block mb-2 flex items-center gap-1.5">
-                  <Smile className="w-3.5 h-3.5 text-amber-400" />
-                  What Moods Best Match Your Watching Style?
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <p className="text-sm font-semibold text-white">Your go-to mood</p>
+                    <p className="text-xs text-zinc-500 mt-0.5">Pick as many as you like.</p>
+                  </div>
+                  <span className="text-xs text-zinc-500">{selectedMoods.length} selected</span>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
                   {AVAILABLE_MOODS.map(m => {
                     const isSelected = selectedMoods.includes(m.name);
                     return (
@@ -482,36 +814,34 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                         key={m.name}
                         type="button"
                         onClick={() => toggleMood(m.name)}
-                        className={`p-3 rounded-xl border text-left flex items-start gap-2.5 transition-all ${
+                        title={m.desc}
+                        className={`px-3.5 py-2 rounded-full border text-sm font-medium transition-all duration-150 ${
                           isSelected
-                            ? 'bg-amber-950/30 border-amber-500 text-white ring-1 ring-amber-500/40'
-                            : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-700'
+                            ? 'bg-white border-white text-zinc-950'
+                            : 'bg-zinc-950 border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:bg-zinc-900'
                         }`}
                       >
-                        <span className="text-xl">{m.emoji}</span>
-                        <div className="flex-1">
-                          <p className="text-xs font-bold text-zinc-100">{m.name}</p>
-                          <p className="text-[11px] text-zinc-400">{m.desc}</p>
-                        </div>
+                        <span className="flex items-center gap-2">
+                          <span>{m.emoji}</span>
+                          {m.name}
+                          {isSelected && <Check className="w-3.5 h-3.5" />}
+                        </span>
                       </button>
                     );
                   })}
                 </div>
               </div>
 
-              {/* Detailed Slider & Selectors */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
-                
-                {/* Decade Selection */}
-                <div className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-2">
-                  <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-                    <Calendar className="w-3.5 h-3.5 text-red-500" />
-                    Preferred Decade
-                  </label>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-950">
+                  <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                    <Calendar className="w-4 h-4 text-zinc-400" />
+                    Preferred era
+                  </div>
                   <select
                     value={preferredDecade}
                     onChange={(e) => setPreferredDecade(e.target.value)}
-                    className="w-full bg-zinc-900 border border-zinc-700 rounded-lg px-3 py-2 text-xs text-zinc-200 focus:outline-none focus:border-red-500"
+                    className="mt-3 w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2.5 text-sm text-zinc-200 focus:outline-none focus:border-zinc-600"
                   >
                     {DECADE_OPTIONS.map(d => (
                       <option key={d.value} value={d.value}>{d.label}</option>
@@ -519,14 +849,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                   </select>
                 </div>
 
-                {/* Min Rating Threshold */}
-                <div className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-2">
+                <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-950">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-                      <Star className="w-3.5 h-3.5 text-amber-400" />
-                      Min Quality Rating
-                    </label>
-                    <span className="text-xs font-extrabold text-amber-400">{minRating.toFixed(1)}+</span>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <Star className="w-4 h-4 text-zinc-400" />
+                      Minimum rating
+                    </div>
+                    <span className="text-sm font-semibold text-white">{minRating.toFixed(1)}</span>
                   </div>
                   <input
                     type="range"
@@ -535,19 +864,21 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                     step="0.5"
                     value={minRating}
                     onChange={(e) => setMinRating(parseFloat(e.target.value))}
-                    className="w-full accent-amber-500"
+                    className="mt-4 w-full accent-red-600"
                   />
-                  <p className="text-[10px] text-zinc-500">Only recommend movies above this score</p>
+                  <div className="mt-2 flex justify-between text-[10px] text-zinc-600">
+                    <span>5.0</span>
+                    <span>8.5</span>
+                  </div>
                 </div>
 
-                {/* Max Runtime */}
-                <div className="p-4 bg-zinc-950 border border-zinc-800 rounded-xl space-y-2">
+                <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-950">
                   <div className="flex items-center justify-between">
-                    <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-blue-400" />
-                      Max Runtime
-                    </label>
-                    <span className="text-xs font-extrabold text-blue-400">Under {maxRuntime}m</span>
+                    <div className="flex items-center gap-2 text-sm font-semibold text-white">
+                      <Clock className="w-4 h-4 text-zinc-400" />
+                      Movie length
+                    </div>
+                    <span className="text-sm font-semibold text-white">{maxRuntime} min</span>
                   </div>
                   <input
                     type="range"
@@ -556,11 +887,13 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                     step="15"
                     value={maxRuntime}
                     onChange={(e) => setMaxRuntime(parseInt(e.target.value))}
-                    className="w-full accent-blue-500"
+                    className="mt-4 w-full accent-red-600"
                   />
-                  <p className="text-[10px] text-zinc-500">Filter out excessively long films</p>
+                  <div className="mt-2 flex justify-between text-[10px] text-zinc-600">
+                    <span>90 min</span>
+                    <span>180 min</span>
+                  </div>
                 </div>
-
               </div>
             </div>
           )}
@@ -568,14 +901,26 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
           {/* STEP 5: GENERATE & PREVIEW RECOMMENDATIONS */}
           {step === 5 && (
             <div className="space-y-6">
-              <div className="p-4 rounded-xl bg-gradient-to-r from-red-950/40 via-zinc-900 to-amber-950/30 border border-red-500/30">
-                <h3 className="text-base font-bold text-white flex items-center gap-2">
-                  <Zap className="w-4 h-4 text-amber-400" />
-                  Your Personalized Hybrid Recommendation Vector is Ready!
-                </h3>
-                <p className="text-xs text-zinc-300 mt-1">
-                  Synthesized {selectedMovies.length} seed movies, {selectedGenres.length} genres, and {selectedLanguages.length} language weights.
-                </p>
+              <div className="flex items-end justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 text-red-400 text-[11px] font-semibold uppercase tracking-[0.16em]">
+                    <Sparkles className="w-3.5 h-3.5" />
+                    Your picks
+                  </div>
+                  <h3 className="mt-2 text-xl font-semibold tracking-tight text-white">
+                    A few movies to get you started
+                  </h3>
+                  <p className="text-sm text-zinc-400 mt-1">
+                    Based on the movies, genres and languages you chose.
+                  </p>
+                </div>
+                <div className="hidden sm:flex items-center gap-1.5 text-xs text-zinc-400">
+                  <span>{selectedMovies.length} movies</span>
+                  <span className="text-zinc-700">•</span>
+                  <span>{selectedGenres.length} genres</span>
+                  <span className="text-zinc-700">•</span>
+                  <span>{selectedLanguages.length} {selectedLanguages.length === 1 ? 'language' : 'languages'}</span>
+                </div>
               </div>
 
               {isGeneratingRecs ? (
@@ -585,27 +930,71 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <h4 className="text-xs font-bold text-zinc-400 uppercase tracking-wider">
-                    Instant Personalized Recommendations:
-                  </h4>
+                  <div className="flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-white">
+                      Your first recommendations
+                    </h4>
+                    <span className="text-xs text-zinc-500">Tap Trailer to watch a preview</span>
+                  </div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                    {generatedRecs.slice(0, 4).map((rec, idx) => (
-                      <div key={rec.movie.id || idx} className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden p-2.5 flex flex-col">
-                        <img
-                          src={rec.movie.poster_path ? (rec.movie.poster_path.startsWith('http') ? rec.movie.poster_path : `https://image.tmdb.org/t/p/w500${rec.movie.poster_path}`) : '/placeholder-poster.jpg'}
-                          alt={rec.movie.title}
-                          className="w-full aspect-[2/3] object-cover rounded-lg mb-2"
-                        />
-                        <p className="text-xs font-bold text-white line-clamp-1">{rec.movie.title}</p>
-                        <div className="flex items-center justify-between mt-1 text-[10px]">
-                          <span className="text-emerald-400 font-bold">{rec.confidence_score}% Match</span>
-                          <span className="text-zinc-400">★ {rec.movie.vote_average?.toFixed(1)}</span>
+                    {generatedRecs.slice(0, 4).map((rec, idx) => {
+                      const posterPath = rec.movie.poster_path || rec.movie.backdrop_path;
+                      const posterUrl = posterPath
+                        ? (posterPath.startsWith('http')
+                            ? posterPath
+                            : `https://image.tmdb.org/t/p/w500${posterPath}`)
+                        : null;
+                      const trailerUrl = recommendationTrailers[rec.movie.id];
+
+                      return (
+                        <div
+                          key={rec.movie.id || idx}
+                          className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden p-2.5 flex flex-col transition-colors hover:border-zinc-700"
+                        >
+                          <div className="relative w-full aspect-[2/3] rounded-lg overflow-hidden mb-2 bg-zinc-900">
+                            {posterUrl && !brokenRecommendationPosterIds.has(rec.movie.id) ? (
+                              <img
+                                src={posterUrl}
+                                alt={rec.movie.title}
+                                className="w-full h-full object-cover"
+                                loading="lazy"
+                                onError={() => {
+                                  setBrokenRecommendationPosterIds(prev => {
+                                    const next = new Set(prev);
+                                    next.add(rec.movie.id);
+                                    return next;
+                                  });
+                                }}
+                              />
+                            ) : (
+                              <div className="w-full h-full flex items-center justify-center text-zinc-500 text-xs px-3 text-center">
+                                Poster unavailable
+                              </div>
+                            )}
+
+                            {trailerUrl && (
+                              <button
+                                type="button"
+                                onClick={() => setActiveTrailer({ title: rec.movie.title, url: trailerUrl })}
+                                className="absolute bottom-2 left-2 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-red-600/95 hover:bg-red-500 text-white text-[10px] font-bold shadow-lg transition-colors"
+                              >
+                                <Play className="w-3 h-3 fill-current" />
+                                Trailer
+                              </button>
+                            )}
+                          </div>
+
+                          <p className="text-xs font-bold text-white line-clamp-1">{rec.movie.title}</p>
+                          <div className="flex items-center justify-between mt-1 text-[10px]">
+                            <span className="text-emerald-400 font-bold">{rec.confidence_score}% Match</span>
+                            <span className="text-zinc-400">★ {rec.movie.vote_average?.toFixed(1)}</span>
+                          </div>
+                          <p className="text-[10px] text-zinc-400 line-clamp-2 mt-1 italic">
+                            {rec.explanation}
+                          </p>
                         </div>
-                        <p className="text-[10px] text-zinc-400 line-clamp-2 mt-1 italic">
-                          {rec.explanation}
-                        </p>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -614,14 +1003,44 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
 
         </div>
 
+        {activeTrailer && (
+          <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
+            <div className="relative w-full max-w-4xl bg-zinc-950 border border-zinc-800 rounded-2xl overflow-hidden shadow-2xl">
+              <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-800">
+                <div className="text-sm font-bold text-white truncate pr-4">
+                  {activeTrailer.title} — Trailer
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveTrailer(null)}
+                  className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800"
+                  aria-label="Close trailer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="aspect-video bg-black">
+                <iframe
+                  src={activeTrailer.url}
+                  title={`${activeTrailer.title} trailer`}
+                  className="w-full h-full"
+                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                  allowFullScreen
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Footer Navigation Bar */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-zinc-800 bg-zinc-950">
+        <div className="flex items-center justify-between px-7 py-4 border-t border-zinc-800 bg-zinc-950">
           <div>
             {step > 1 && (
               <button
                 type="button"
                 onClick={() => setStep(step - 1)}
-                className="px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition-colors"
+                className="px-3.5 py-2 bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 text-zinc-300 text-xs font-medium rounded-lg flex items-center gap-1.5 transition-colors"
               >
                 <ChevronLeft className="w-4 h-4" />
                 Previous
@@ -633,7 +1052,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="text-xs text-zinc-400 hover:text-zinc-200 underline font-medium px-2"
+              className="text-xs text-zinc-500 hover:text-zinc-300 font-medium px-2"
             >
               Skip for now
             </button>
@@ -642,7 +1061,7 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               <button
                 type="button"
                 onClick={() => setStep(step + 1)}
-                className="px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-red-600/30 transition-all hover:scale-[1.02]"
+                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
               >
                 Continue
                 <ChevronRight className="w-4 h-4" />
@@ -651,17 +1070,17 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
               <button
                 type="button"
                 onClick={handleProceedToStep5}
-                className="px-5 py-2.5 bg-gradient-to-r from-red-600 to-amber-500 hover:from-red-500 hover:to-amber-400 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-red-600/30 transition-all hover:scale-[1.02]"
+                className="px-5 py-2.5 bg-white hover:bg-zinc-200 text-zinc-950 text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors"
               >
-                Generate Recommendations
-                <Sparkles className="w-4 h-4" />
+                Show My Picks
+                <ChevronRight className="w-4 h-4" />
               </button>
             ) : (
               <button
                 type="button"
                 disabled={isSubmitting}
                 onClick={handleFinishOnboarding}
-                className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-lg shadow-emerald-600/30 transition-all hover:scale-[1.02] disabled:opacity-50"
+                className="px-5 py-2.5 bg-red-600 hover:bg-red-500 text-white text-xs font-semibold rounded-lg flex items-center gap-1.5 transition-colors disabled:opacity-50"
               >
                 {isSubmitting ? 'Saving Profile...' : 'Save & Start Exploring'}
                 <Check className="w-4 h-4" />

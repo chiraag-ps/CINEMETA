@@ -438,162 +438,445 @@ export class MetaLearningRecommendationEngine {
   /**
    * Unified Two-Stage Hybrid Recommendation Pipeline
    */
-  public async generateUnifiedRecommendations(
-    user?: UserProfile,
-    selectedMovieIdsOverride?: number[],
-    topN: number = 20,
-    diversityLambdaOverride?: number
-  ): Promise<{
-    recommendations: RecommendationResult[];
-    algorithmUsed: 'unified_hybrid';
-    interactionCount: number;
-    metaDecisionReason: string;
-       metrics: EvaluationMetrics;
-  }> {
-    const allMovies = db.getAllMovies();
-    if (allMovies.length === 0) {
-      return {
-        recommendations: [],
-        algorithmUsed: 'unified_hybrid',
-        interactionCount: 0,
-        metaDecisionReason: 'Empty catalog',
-        metrics: this.evaluator.evaluateModelPerformance([], [], this.featureExtractor, 0, user)
-      };
-    }
+public async generateUnifiedRecommendations(
+  user?: UserProfile,
+  selectedMovieIdsOverride?: number[],
+  topN: number = 20,
+  diversityLambdaOverride?: number
+): Promise<{
+  recommendations: RecommendationResult[];
+  algorithmUsed: 'unified_hybrid';
+  interactionCount: number;
+  metaDecisionReason: string;
+  metrics: EvaluationMetrics;
+}> {
+  const allMovies = db.getAllMovies();
 
-    // 1. Build complete exclusion set
-    const excludedSet = new Set<number>([
+  if (allMovies.length === 0) {
+    return {
+      recommendations: [],
+      algorithmUsed: 'unified_hybrid',
+      interactionCount: 0,
+      metaDecisionReason: 'Empty catalog',
+      metrics: this.evaluator.evaluateModelPerformance(
+        [],
+        [],
+        this.featureExtractor,
+        0,
+        user
+      )
+    };
+  }
+
+  // ------------------------------------------------------------
+  // 1. Build exclusion set
+  // ------------------------------------------------------------
+
+  const excludedSet = new Set<number>([
+    ...(selectedMovieIdsOverride || []),
+    ...(user?.watchlistMovieIds || []),
+    ...(user?.watchedMovieIds || []),
+    ...(user?.likedMovieIds || []),
+    ...(user?.dislikedMovieIds || []),
+    ...Object.keys(user?.ratings || {}).map(Number)
+  ]);
+
+  // ------------------------------------------------------------
+  // 2. Gather source / seed movies
+  // ------------------------------------------------------------
+
+  const sourceMovieIds = Array.from(
+    new Set([
       ...(selectedMovieIdsOverride || []),
-      ...(user?.watchlistMovieIds || []),
       ...(user?.watchedMovieIds || []),
       ...(user?.likedMovieIds || []),
-      ...(user?.dislikedMovieIds || []),
-      ...Object.keys(user?.ratings || {}).map(Number)
-    ]);
-
-    // 2. Gather seed interaction movies
-    const sourceMovieIds = Array.from(new Set([
-      ...(selectedMovieIdsOverride || []),
-      ...(user?.watchedMovieIds || []),
-      ...(user?.likedMovieIds || []),
       ...(user?.watchlistMovieIds || []),
       ...Object.keys(user?.ratings || {}).map(Number)
-    ]));
-
-    const sourceMovies = sourceMovieIds
-      .map(id => db.getMovieById(id))
-      .filter((m): m is Movie => m !== undefined);
-
-    const lambda = diversityLambdaOverride !== undefined ? diversityLambdaOverride : this.diversityLambda;
-
-    // 3. Extract Dual-Taste Representations (Positive + Negative Profiles + User Stage)
-    const taste = this.featureExtractor.extractUserTaste(sourceMovies, user);
-
-    // 4. STAGE 1: Candidate Generation (Retrieval Pool of 150 candidates)
-   // 4. STAGE 1: Candidate Generation
-//
-// For warm/few-shot users:
-//   Use interaction movies as TMDb seeds.
-//
-// For cold-start users:
-//   Use TMDb discovery based on onboarding preferences.
-//
-// Both paths feed into the SAME CandidateGenerator.
-let tmdbCandidates: Movie[] = [];
-
-if (sourceMovies.length > 0) {
-  // Warm / few-shot TMDb expansion from known taste seeds.
-  tmdbCandidates =
-    await tmdbService.fetchRecommendationsForMovies(
-      sourceMovies
-    );
-} else {
-  // Cold-start TMDb discovery.
-  tmdbCandidates =
-    await tmdbService.fetchColdStartCandidates(
-      user
-    );
-}
-
-const expandedCatalog = db.getAllMovies();
-
-const candidatePool =
-  this.candidateGenerator.generateCandidatePool(
-    expandedCatalog,
-    taste,
-    excludedSet,
-    this.featureExtractor,
-    user,
-    150,
-    tmdbCandidates
+    ])
   );
 
-    // Fallback if candidate pool is empty
-    if (candidatePool.length === 0) {
-      const fallback = allMovies
-        .filter(m => !excludedSet.has(m.id))
+  const sourceMovies = sourceMovieIds
+    .map(id => db.getMovieById(id))
+    .filter((m): m is Movie => m !== undefined);
+
+  const lambda =
+    diversityLambdaOverride !== undefined
+      ? diversityLambdaOverride
+      : this.diversityLambda;
+
+  // ------------------------------------------------------------
+  // 3. Extract user taste
+  // ------------------------------------------------------------
+
+  const taste = this.featureExtractor.extractUserTaste(
+    sourceMovies,
+    user
+  );
+
+  // ------------------------------------------------------------
+  // 4. Candidate generation
+  // ------------------------------------------------------------
+
+  let tmdbCandidates: Movie[] = [];
+
+  if (sourceMovies.length > 0) {
+    // Warm / few-shot users:
+    // Expand from the movies the user interacted with.
+    tmdbCandidates =
+      await tmdbService.fetchRecommendationsForMovies(
+        sourceMovies
+      );
+  } else {
+    // Cold-start:
+    // Discover movies using onboarding preferences.
+    tmdbCandidates =
+      await tmdbService.fetchColdStartCandidates(user);
+  }
+
+  const expandedCatalog = db.getAllMovies();
+
+  let candidatePool =
+    this.candidateGenerator.generateCandidatePool(
+      expandedCatalog,
+      taste,
+      excludedSet,
+      this.featureExtractor,
+      user,
+      150,
+      tmdbCandidates
+    );
+
+  // ------------------------------------------------------------
+  // 5. HARD LANGUAGE FILTER
+  // ------------------------------------------------------------
+  //
+  // Language is now a hard requirement when the user has
+  // completed onboarding and selected a preferred language.
+  //
+  // This means:
+  //
+  // Kannada -> only "kn"
+  // Tamil   -> only "ta"
+  // Telugu  -> only "te"
+  // Hindi   -> only "hi"
+  // Malayalam -> only "ml"
+  //
+  // We also support language names such as "Kannada".
+  // ------------------------------------------------------------
+
+  const languageAliases: Record<string, string> = {
+    english: 'en',
+    hindi: 'hi',
+    kannada: 'kn',
+    tamil: 'ta',
+    telugu: 'te',
+    malayalam: 'ml',
+    bengali: 'bn',
+    marathi: 'mr',
+    gujarati: 'gu',
+    punjabi: 'pa',
+    urdu: 'ur',
+    korean: 'ko',
+    japanese: 'ja',
+    french: 'fr',
+    spanish: 'es',
+    german: 'de',
+    italian: 'it'
+  };
+
+  const preferredLanguages =
+    (user?.preferredLanguages || [])
+      .map(language => {
+        const normalized = normalizeLanguage(language);
+
+        return (
+          languageAliases[normalized] ||
+          languageAliases[language.toLowerCase()] ||
+          normalized
+        );
+      })
+      .filter(Boolean);
+
+  /*
+   * Only apply the hard language filter after onboarding.
+   *
+   * This avoids accidentally forcing the system to English for
+   * a user who has not selected any language preference.
+   */
+  const shouldFilterLanguage =
+    Boolean(
+      user?.onboardingCompleted &&
+      preferredLanguages.length > 0
+    );
+
+  if (shouldFilterLanguage) {
+    const allowedLanguages = new Set(
+      preferredLanguages
+    );
+
+    const languageFilteredPool =
+      candidatePool.filter(candidate =>
+        allowedLanguages.has(
+          normalizeLanguage(candidate.movie.language)
+        )
+      );
+
+    console.log(
+      `[REC LANGUAGE FILTER] User languages: ${preferredLanguages.join(', ')}`
+    );
+
+    console.log(
+      `[REC LANGUAGE FILTER] Before: ${candidatePool.length}`
+    );
+
+    console.log(
+      `[REC LANGUAGE FILTER] After: ${languageFilteredPool.length}`
+    );
+
+    /*
+     * If the main candidate generator did not produce enough
+     * movies in the requested language, add matching movies
+     * directly from the expanded catalog.
+     */
+    if (languageFilteredPool.length < topN) {
+      const existingIds = new Set(
+        languageFilteredPool.map(c => c.movie.id)
+      );
+
+      const extraLanguageMovies =
+        expandedCatalog
+          .filter(movie => {
+            const movieLanguage =
+              normalizeLanguage(movie.language);
+
+            return (
+              allowedLanguages.has(movieLanguage) &&
+              !excludedSet.has(movie.id) &&
+              !existingIds.has(movie.id)
+            );
+          })
+          .slice(0, topN * 3);
+
+      const extraCandidates =
+        extraLanguageMovies.map(movie => ({
+          movie,
+          initialScore: 0,
+          retrievalChannels: ['language_filter_fallback']
+        }));
+
+      candidatePool = [
+        ...languageFilteredPool,
+        ...extraCandidates
+      ];
+    } else {
+      candidatePool = languageFilteredPool;
+    }
+  }
+
+  // ------------------------------------------------------------
+  // 6. Fallback if no candidates exist
+  // ------------------------------------------------------------
+
+  if (candidatePool.length === 0) {
+    const fallbackBase = shouldFilterLanguage
+      ? allMovies.filter(movie => {
+          const movieLanguage =
+            normalizeLanguage(movie.language);
+
+          return (
+            preferredLanguages.includes(movieLanguage) &&
+            !excludedSet.has(movie.id)
+          );
+        })
+      : allMovies.filter(
+          movie => !excludedSet.has(movie.id)
+        );
+
+    const fallback =
+      fallbackBase
         .slice(0, topN)
         .map(movie => ({
           movie,
           similarity_score: 0.85,
           confidence_score: 85,
-          algorithm_used: 'unified_hybrid' as const,
-          explanation: `Catalog quality recommendation (${movie.vote_average}/10 rating).`,
-          matched_reasons: ['High catalog rating quality']
+          algorithm_used:
+            'unified_hybrid' as const,
+          explanation: shouldFilterLanguage
+            ? `Recommended because it matches your preferred ${getLanguageDisplayName(
+                normalizeLanguage(movie.language)
+              )} language.`
+            : `Catalog quality recommendation (${movie.vote_average}/10 rating).`,
+          matched_reasons: shouldFilterLanguage
+            ? [
+                `${getLanguageDisplayName(
+                  normalizeLanguage(movie.language)
+                )} language match`
+              ]
+            : ['High catalog rating quality']
         }));
-      const metrics = this.evaluator.evaluateModelPerformance(fallback, [], this.featureExtractor, allMovies.length, user);
-      return {
-        recommendations: fallback,
-        algorithmUsed: 'unified_hybrid',
-        interactionCount: 0,
-        metaDecisionReason: 'Catalog baseline recommendation.',
-        metrics
-      };
-    }
 
-    // 5. STAGE 2: Candidate Ranking with Normalized Multi-Signal Features
-    const scoredCandidates = this.scoreCandidates(candidatePool, taste, user);
+    const metrics =
+      this.evaluator.evaluateModelPerformance(
+        fallback,
+        [],
+        this.featureExtractor,
+        allMovies.length,
+        user
+      );
 
-    // 6. MMR Diversity Re-ranking
-    const diverseRanked = this.applyMMRDiversityReRanking(scoredCandidates, topN, lambda);
+    return {
+      recommendations: fallback,
+      algorithmUsed: 'unified_hybrid',
+      interactionCount: Math.max(
+        user?.interactionCount || 0,
+        sourceMovieIds.length
+      ),
+      metaDecisionReason:
+        shouldFilterLanguage
+          ? `Cold-start language-filtered recommendation for ${getLanguageDisplayName(
+              preferredLanguages[0]
+            )}.`
+          : 'Catalog baseline recommendation.',
+      metrics
+    };
+  }
 
-    // 7. Format Recommendations with Calibrated Confidence Scores
-    const recommendations: RecommendationResult[] = diverseRanked.map(item => {
-      const confidence = Math.round(Math.min(99, Math.max(1, item.score * 100)));
+  // ------------------------------------------------------------
+  // 7. Score candidates
+  // ------------------------------------------------------------
+
+  const scoredCandidates =
+    this.scoreCandidates(
+      candidatePool,
+      taste,
+      user
+    );
+
+  // ------------------------------------------------------------
+  // 8. MMR diversity re-ranking
+  // ------------------------------------------------------------
+
+  const diverseRanked =
+    this.applyMMRDiversityReRanking(
+      scoredCandidates,
+      topN,
+      lambda
+    );
+
+  // ------------------------------------------------------------
+  // 9. Format final recommendations
+  // ------------------------------------------------------------
+
+  const recommendations =
+    diverseRanked.map(item => {
+      const confidence = Math.round(
+        Math.min(
+          99,
+          Math.max(
+            1,
+            item.score * 100
+          )
+        )
+      );
+
       return {
         movie: item.movie,
-        similarity_score: Math.round(item.score * 100) / 100,
-        confidence_score: confidence,
-        algorithm_used: 'unified_hybrid' as const,
-        explanation: item.explanationDetails.reason,
-        matched_reasons: item.reasons.length > 0 ? item.reasons : [`High multi-signal correlation (${confidence}%)`],
-        explanation_details: item.explanationDetails
+        similarity_score:
+          Math.round(
+            item.score * 100
+          ) / 100,
+        confidence_score:
+          confidence,
+        algorithm_used:
+          'unified_hybrid' as const,
+        explanation:
+          item.explanationDetails.reason,
+        matched_reasons:
+          item.reasons.length > 0
+            ? item.reasons
+            : [
+                `High multi-signal correlation (${confidence}%)`
+              ],
+        explanation_details:
+          item.explanationDetails
       };
     });
 
-    const metrics = this.evaluator.evaluateModelPerformance(
-      recommendations,
+  // ------------------------------------------------------------
+  // 10. Final safety check
+  // ------------------------------------------------------------
+  //
+  // This guarantees that a language-filtered request cannot
+  // accidentally return a movie in another language even if
+  // another component changes later.
+  // ------------------------------------------------------------
+
+  const finalRecommendations =
+    shouldFilterLanguage
+      ? recommendations.filter(rec =>
+          preferredLanguages.includes(
+            normalizeLanguage(
+              rec.movie.language
+            )
+          )
+        )
+      : recommendations;
+
+  // ------------------------------------------------------------
+  // 11. Evaluation
+  // ------------------------------------------------------------
+
+  const metrics =
+    this.evaluator.evaluateModelPerformance(
+      finalRecommendations,
       sourceMovieIds,
       this.featureExtractor,
       allMovies.length,
       user
     );
 
-    const domLangName = getLanguageDisplayName(taste.positive.dominantLanguage);
-    const interactionCount = Math.max(user?.interactionCount || 0, sourceMovieIds.length);
+  const domLangName =
+    shouldFilterLanguage
+      ? getLanguageDisplayName(
+          preferredLanguages[0]
+        )
+      : getLanguageDisplayName(
+          taste.positive.dominantLanguage
+        );
 
-    let stageText = 'Cold-Start Onboarding';
-    if (taste.userStage === 'few_shot') stageText = 'Few-Shot Meta-Learned';
-    if (taste.userStage === 'warm') stageText = 'Warm Personalized';
+  const interactionCount =
+    Math.max(
+      user?.interactionCount || 0,
+      sourceMovieIds.length
+    );
 
-    return {
-      recommendations,
-      algorithmUsed: 'unified_hybrid',
-      interactionCount,
-      metaDecisionReason: `Two-Stage Hybrid Engine [${stageText}]: Multi-channel retrieval + Normalized ranking tailored for ${domLangName} language, genres & story tropes.`,
-      metrics
-    };
+  let stageText =
+    'Cold-Start Onboarding';
+
+  if (taste.userStage === 'few_shot') {
+    stageText =
+      'Few-Shot Meta-Learned';
   }
+
+  if (taste.userStage === 'warm') {
+    stageText =
+      'Warm Personalized';
+  }
+
+  const languageText =
+    shouldFilterLanguage
+      ? ` restricted to ${domLangName}`
+      : '';
+
+  return {
+    recommendations: finalRecommendations,
+    algorithmUsed: 'unified_hybrid',
+    interactionCount,
+    metaDecisionReason:
+      `Two-Stage Hybrid Engine [${stageText}]: Multi-channel retrieval + normalized ranking${languageText}, genres & story tropes.`,
+    metrics
+  };
+}
 
   /**
    * "More Like This" / Similar Movies by Content & Embedding Cosine Distance
@@ -706,7 +989,15 @@ const candidatePool =
   }
 
   /**
-   * Natural Language Search Query Parser & Semantic Matcher
+   * Natural Language Search Query Parser & Grounded Catalog Matcher
+   *
+   * Explicit constraints in the user's query are treated as hard filters:
+   *   - "Hindi thriller" -> Hindi + Thriller only
+   *   - "Kannada comedy" -> Kannada + Comedy only
+   *   - "sci-fi under 2 hours" -> Sci-Fi + runtime constraint
+   *
+   * We intentionally do not relax an explicit genre/language constraint
+   * just to fill the result list with unrelated movies.
    */
   public searchByNaturalLanguage(query: string, user?: UserProfile): {
     extractedFilters: {
@@ -718,39 +1009,92 @@ const candidatePool =
     };
     results: RecommendationResult[];
   } {
-    const q = (query || '').toLowerCase();
+    const q = (query || '').trim().toLowerCase();
     const allMovies = db.getAllMovies();
 
     const extractedGenres: string[] = [];
     const extractedMoods: string[] = [];
-    let maxRuntime: number | undefined = undefined;
-    let minRating: number | undefined = undefined;
     const keywords: string[] = [];
+    let maxRuntime: number | undefined;
+    let minRating: number | undefined;
 
     const genreKeywords: Record<string, string> = {
-      'sci-fi': 'Sci-Fi', 'science fiction': 'Sci-Fi', 'space': 'Sci-Fi',
-      'action': 'Action', 'adventure': 'Adventure', 'animation': 'Animation', 'animated': 'Animation',
-      'comedy': 'Comedy', 'funny': 'Comedy', 'humor': 'Comedy', 'hilarious': 'Comedy',
-      'crime': 'Crime', 'documentary': 'Documentary', 'drama': 'Drama', 'dramatic': 'Drama',
-      'fantasy': 'Fantasy', 'horror': 'Horror', 'scary': 'Horror', 'mystery': 'Mystery',
-      'romance': 'Romance', 'romantic': 'Romance', 'thriller': 'Thriller', 'suspense': 'Thriller'
+      'sci-fi': 'Sci-Fi',
+      'science fiction': 'Sci-Fi',
+      'action': 'Action',
+      'adventure': 'Adventure',
+      'animation': 'Animation',
+      'animated': 'Animation',
+      'comedy': 'Comedy',
+      'funny': 'Comedy',
+      'humor': 'Comedy',
+      'hilarious': 'Comedy',
+      'crime': 'Crime',
+      'documentary': 'Documentary',
+      'drama': 'Drama',
+      'dramatic': 'Drama',
+      'fantasy': 'Fantasy',
+      'horror': 'Horror',
+      'scary': 'Horror',
+      'mystery': 'Mystery',
+      'romance': 'Romance',
+      'romantic': 'Romance',
+      'thriller': 'Thriller',
+      'suspense': 'Thriller'
     };
 
+    const moodKeywords: Record<string, string> = {
+      'fun': 'Fun',
+      'lighthearted': 'Fun',
+      'entertaining': 'Fun',
+      'emotional': 'Emotional',
+      'tearjerker': 'Emotional',
+      'heartfelt': 'Emotional',
+      'touching': 'Emotional',
+      'dark': 'Dark',
+      'gritty': 'Dark',
+      'bleak': 'Dark',
+      'suspenseful': 'Suspenseful',
+      'thrilling': 'Suspenseful',
+      'edge of seat': 'Suspenseful',
+      'thought-provoking': 'Thought-provoking',
+      'mind-bending': 'Thought-provoking',
+      'philosophical': 'Thought-provoking',
+      'relaxing': 'Relaxing',
+      'calm': 'Relaxing',
+      'chill': 'Relaxing',
+      'cozy': 'Relaxing',
+      'inspirational': 'Inspirational',
+      'uplifting': 'Inspirational',
+      'motivating': 'Inspirational'
+    };
+
+    const languageAliases: Record<string, string> = {
+      english: 'en',
+      hindi: 'hi',
+      kannada: 'kn',
+      tamil: 'ta',
+      telugu: 'te',
+      malayalam: 'ml',
+      bengali: 'bn',
+      marathi: 'mr',
+      gujarati: 'gu',
+      punjabi: 'pa',
+      urdu: 'ur',
+      korean: 'ko',
+      japanese: 'ja',
+      french: 'fr',
+      spanish: 'es',
+      german: 'de',
+      italian: 'it'
+    };
+
+    // Extract genres and moods from the query.
     for (const [key, genreName] of Object.entries(genreKeywords)) {
       if (q.includes(key) && !extractedGenres.includes(genreName)) {
         extractedGenres.push(genreName);
       }
     }
-
-    const moodKeywords: Record<string, string> = {
-      'fun': 'Fun', 'lighthearted': 'Fun', 'entertaining': 'Fun',
-      'emotional': 'Emotional', 'tearjerker': 'Emotional', 'heartfelt': 'Emotional', 'touching': 'Emotional',
-      'dark': 'Dark', 'gritty': 'Dark', 'bleak': 'Dark',
-      'suspenseful': 'Suspenseful', 'thrilling': 'Suspenseful', 'edge of seat': 'Suspenseful',
-      'thought-provoking': 'Thought-provoking', 'mind-bending': 'Thought-provoking', 'philosophical': 'Thought-provoking',
-      'relaxing': 'Relaxing', 'calm': 'Relaxing', 'chill': 'Relaxing', 'cozy': 'Relaxing',
-      'inspirational': 'Inspirational', 'uplifting': 'Inspirational', 'motivating': 'Inspirational'
-    };
 
     for (const [key, moodName] of Object.entries(moodKeywords)) {
       if (q.includes(key) && !extractedMoods.includes(moodName)) {
@@ -758,98 +1102,207 @@ const candidatePool =
       }
     }
 
-    if (q.includes('under 2 hours') || q.includes('under two hours') || q.includes('less than 2 hours') || q.includes('120 min')) {
+    // Detect an explicit language in the user's request.
+    let requestedLanguage: string | undefined;
+    for (const [name, code] of Object.entries(languageAliases)) {
+      const languagePattern = new RegExp(`\\b${name}\\b`, 'i');
+      if (languagePattern.test(q)) {
+        requestedLanguage = code;
+        break;
+      }
+    }
+
+    // Use the saved preference only when the user did not explicitly
+    // specify a language in the current request.
+    const preferredLanguages = (user?.preferredLanguages || [])
+      .map(language => {
+        const value = String(language || '').trim().toLowerCase();
+        return languageAliases[value] || normalizeLanguage(value);
+      })
+      .filter(Boolean);
+
+    const activeLanguages = requestedLanguage
+      ? [requestedLanguage]
+      : Array.from(new Set(preferredLanguages));
+
+    // Runtime / rating constraints.
+    if (
+      q.includes('under 2 hours') ||
+      q.includes('under two hours') ||
+      q.includes('less than 2 hours') ||
+      q.includes('120 min')
+    ) {
       maxRuntime = 120;
-    } else if (q.includes('under 90') || q.includes('under 1.5 hours') || q.includes('short')) {
+    } else if (
+      q.includes('under 90') ||
+      q.includes('under 1.5 hours')
+    ) {
       maxRuntime = 95;
     }
 
-    if (q.includes('high rated') || q.includes('critically acclaimed') || q.includes('best') || q.includes('top rated')) {
+    if (
+      q.includes('high rated') ||
+      q.includes('critically acclaimed') ||
+      q.includes('top rated')
+    ) {
       minRating = 7.5;
     }
 
-    const tokens = tokenize(q);
-    tokens.forEach(t => {
-      if (!genreKeywords[t] && !moodKeywords[t] && t.length > 3) {
-        keywords.push(t);
+    const ignoredWords = new Set([
+      'recommend', 'recommendation', 'recommendations',
+      'movie', 'movies', 'film', 'films',
+      'please', 'give', 'show', 'find', 'suggest',
+      'some', 'want', 'like', 'looking', 'need',
+      'for', 'with', 'me', 'my', 'the', 'a', 'an',
+      'of', 'to', 'watch', 'watching', 'something',
+      'good', 'can', 'could', 'would', 'from', 'tonight',
+      ...Object.keys(genreKeywords),
+      ...Object.keys(moodKeywords),
+      ...Object.keys(languageAliases)
+    ]);
+
+    tokenize(q).forEach(token => {
+      if (token.length > 3 && !ignoredWords.has(token)) {
+        keywords.push(token);
       }
     });
 
-    const scored = allMovies.map(movie => {
-      let matchScore = 0.5;
+    // ----------------------------------------------------------
+    // HARD FILTERS
+    // ----------------------------------------------------------
+    let candidateMovies = allMovies;
+
+    if (activeLanguages.length > 0) {
+      candidateMovies = candidateMovies.filter(movie =>
+        activeLanguages.includes(normalizeLanguage(movie.language))
+      );
+    }
+
+    if (extractedGenres.length > 0) {
+      candidateMovies = candidateMovies.filter(movie => {
+        const movieGenres = Array.isArray(movie.genres)
+          ? movie.genres.map(g => typeof g === 'string' ? g : g.name)
+          : [];
+
+        return extractedGenres.every(genre => movieGenres.includes(genre));
+      });
+    }
+
+    // Never return unrelated movies merely to fill four cards.
+    if (candidateMovies.length === 0) {
+      console.log(
+        `[NLP SEARCH] No exact catalog matches for query="${query}" language=${requestedLanguage || 'profile/default'} genres=${extractedGenres.join(',') || 'none'}`
+      );
+
+      return {
+        extractedFilters: {
+          genres: extractedGenres,
+          moods: extractedMoods,
+          maxRuntime,
+          minRating,
+          keywords
+        },
+        results: []
+      };
+    }
+
+    // ----------------------------------------------------------
+    // RELEVANCE SCORING
+    // ----------------------------------------------------------
+    const scored = candidateMovies.map(movie => {
+      let matchScore = 0.30;
       const reasons: string[] = [];
 
-      const mGenres = Array.isArray(movie.genres)
+      const movieLanguage = normalizeLanguage(movie.language);
+      const movieGenres = Array.isArray(movie.genres)
         ? movie.genres.map(g => typeof g === 'string' ? g : g.name)
         : [];
 
-      const matchedG = extractedGenres.filter(g => mGenres.includes(g));
-      if (matchedG.length > 0) {
-        matchScore += 0.3 * (matchedG.length / Math.max(1, extractedGenres.length));
-        reasons.push(`Matches genre query: ${matchedG.join(', ')}`);
+      const matchedGenres = extractedGenres.filter(genre =>
+        movieGenres.includes(genre)
+      );
+
+      if (activeLanguages.length > 0 && activeLanguages.includes(movieLanguage)) {
+        matchScore += requestedLanguage ? 0.35 : 0.20;
+        reasons.push(`${getLanguageDisplayName(movieLanguage)} language match`);
       }
 
-      const mMoods = movie.moods || [];
-      const matchedM = extractedMoods.filter(m => mMoods.includes(m));
-      if (matchedM.length > 0) {
-        matchScore += 0.25 * (matchedM.length / Math.max(1, extractedMoods.length));
-        reasons.push(`Aligned with "${matchedM.join(', ')}" mood`);
+      if (matchedGenres.length > 0) {
+        matchScore += 0.40 * (matchedGenres.length / Math.max(1, extractedGenres.length));
+        reasons.push(`Matches ${matchedGenres.join(', ')}`);
       }
 
-      if (maxRuntime && movie.runtime) {
-        if (movie.runtime <= maxRuntime) {
-          matchScore += 0.15;
-          reasons.push(`Runtime (${movie.runtime}m) satisfies under ${maxRuntime}m`);
-        } else {
-          matchScore -= 0.3;
+      const movieMoods = movie.moods || [];
+      const matchedMoods = extractedMoods.filter(mood => movieMoods.includes(mood));
+
+      if (matchedMoods.length > 0) {
+        matchScore += 0.15 * (matchedMoods.length / Math.max(1, extractedMoods.length));
+        reasons.push(`Fits ${matchedMoods.join(', ')} mood`);
+      }
+
+      if (maxRuntime !== undefined) {
+        if (movie.runtime && movie.runtime <= maxRuntime) {
+          matchScore += 0.10;
+          reasons.push(`Under ${maxRuntime} minutes`);
+        } else if (movie.runtime) {
+          matchScore -= 0.30;
         }
       }
 
-      if (minRating) {
+      if (minRating !== undefined) {
         if (movie.vote_average >= minRating) {
-          matchScore += 0.15;
-          reasons.push(`Rating (${movie.vote_average}/10)`);
+          matchScore += 0.10;
+          reasons.push(`Rating ${movie.vote_average}/10`);
         } else {
-          matchScore -= 0.2;
+          matchScore -= 0.25;
         }
       }
 
       const overviewWords = tokenize(movie.overview || '');
-      let kwMatches = 0;
-      keywords.forEach(kw => {
-        if (overviewWords.includes(kw) || movie.title.toLowerCase().includes(kw)) {
-          kwMatches++;
-        }
-      });
-      if (kwMatches > 0) {
-        matchScore += 0.2 * Math.min(1.0, kwMatches / Math.max(1, keywords.length));
-        reasons.push(`Relevant storyline context`);
+      const titleText = movie.title.toLowerCase();
+      const keywordMatches = keywords.filter(keyword =>
+        overviewWords.includes(keyword) || titleText.includes(keyword)
+      );
+
+      if (keywordMatches.length > 0) {
+        matchScore += 0.10 * Math.min(1, keywordMatches.length / Math.max(1, keywords.length));
+        reasons.push('Storyline matches your request');
       }
 
-      const confidence = Math.round(Math.min(99, Math.max(45, matchScore * 100)));
+      // Rating is only a tie-breaker, never a replacement for the query constraints.
+      matchScore += Math.min(0.08, Math.max(0, (movie.vote_average || 0) - 6) / 50);
+
+      const boundedScore = Math.max(0.01, Math.min(0.99, matchScore));
+      const confidence = Math.round(Math.min(99, Math.max(45, boundedScore * 100)));
 
       return {
         movie,
-        similarity_score: Math.round(Math.min(0.99, Math.max(0.1, matchScore)) * 100) / 100,
+        similarity_score: Math.round(boundedScore * 100) / 100,
         confidence_score: confidence,
         algorithm_used: 'unified_hybrid' as const,
         explanation: reasons.length > 0
-          ? `Natural Language Match (${confidence}%): ${reasons.join(' · ')}`
-          : `Relevance score (${confidence}%) based on semantic intent and catalog quality.`,
-        matched_reasons: reasons.length > 0 ? reasons : ['Catalog relevance match'],
+          ? `Matched ${confidence}% based on ${reasons.join(' · ')}.`
+          : `Relevant catalog match (${confidence}%).`,
+        matched_reasons: reasons.length > 0
+          ? reasons
+          : ['Relevant catalog match'],
         explanation_details: {
-          content_match: Math.round(matchScore * 100) / 100,
-          genre_match: matchedG.length > 0 ? 0.9 : 0.5,
-          collaborative_score: (movie.vote_average || 7) / 10,
-          user_preference_score: 0.85,
-          embedding_similarity: 0.80,
-          reason: reasons.join('. ') || 'Matched semantic intent.',
+          content_match: boundedScore,
+          genre_match: matchedGenres.length > 0 ? 1 : 0,
+          collaborative_score: (movie.vote_average || 0) / 10,
+          user_preference_score: activeLanguages.includes(movieLanguage) ? 1 : 0.5,
+          embedding_similarity: boundedScore,
+          reason: reasons.join('. ') || 'Matched catalog intent.',
           breakdown: reasons
         }
       };
     });
 
     scored.sort((a, b) => b.similarity_score - a.similarity_score);
+
+    console.log(
+      `[NLP SEARCH] query="${query}" language=${requestedLanguage || 'profile/default'} genres=${extractedGenres.join(',') || 'none'} results=${scored.length}`
+    );
 
     return {
       extractedFilters: {
@@ -862,6 +1315,7 @@ const candidatePool =
       results: scored.slice(0, 15)
     };
   }
+
 }
 
 export const recommenderEngine = new MetaLearningRecommendationEngine();

@@ -448,6 +448,9 @@ export const api = {
   async generateRecommendations(options?: {
     selectedMovieIds?: number[];
     selectedMovies?: Movie[];
+    preferredLanguages?: string[];
+    favoriteGenres?: string[];
+    preferences?: Record<string, any>;
     diversityLambda?: number;
   }): Promise<{
     recommendations: RecommendationResult[];

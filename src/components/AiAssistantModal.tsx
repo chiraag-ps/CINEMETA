@@ -1,17 +1,11 @@
-import React, { useState } from 'react';
+import React, { FormEvent, useEffect, useMemo, useState } from 'react';
 import {
-  Sparkles,
   Bot,
-  Send,
-  X,
-  Play,
-  Tv,
-  Film,
-  Star,
   ExternalLink,
-  ChevronRight,
-  ShieldCheck,
-  Zap
+  Search,
+  Send,
+  Star,
+  X,
 } from 'lucide-react';
 import { Movie } from '../types';
 import { api } from '../services/api';
@@ -19,210 +13,465 @@ import { api } from '../services/api';
 interface AiAssistantModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelectMovie: (movie: Movie) => void;
+  onSelectMovie?: (movie: Movie) => void;
 }
 
-interface Message {
-  sender: 'user' | 'assistant';
-  text: string;
+interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
   recommendedMovies?: Movie[];
-  timestamp: string;
+  createdAt: string;
 }
 
-const EXAMPLE_PROMPTS = [
-  'Fast-paced psychological thrillers with high ratings',
-  'Kannada and Indian blockbusters like Kantara or KGF',
-  'Mind-bending sci-fi movies similar to Interstellar',
-  'Relaxing, uplifting movies for family movie night'
-];
+const getPosterUrl = (posterPath?: string | null) => {
+  if (!posterPath) return '';
+
+  if (posterPath.startsWith('http://') || posterPath.startsWith('https://')) {
+    return posterPath;
+  }
+
+  if (posterPath.startsWith('/')) {
+    return `https://image.tmdb.org/t/p/w342${posterPath}`;
+  }
+
+  return '';
+};
+
+const getYear = (date?: string) => {
+  if (!date) return '';
+  return date.slice(0, 4);
+};
+
+const getGenreNames = (movie: Movie) => {
+  if (!Array.isArray(movie.genres)) return [];
+
+  return movie.genres
+    .map((genre) => (typeof genre === 'string' ? genre : genre.name))
+    .filter(Boolean);
+};
+
+const createId = () =>
+  `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
 export const AiAssistantModal: React.FC<AiAssistantModalProps> = ({
   isOpen,
   onClose,
-  onSelectMovie
+  onSelectMovie,
 }) => {
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      sender: 'assistant',
-      text: 'Hello! I am your CINEMETA Concierge. Ask me for personalized recommendations by mood, plot themes, directors, or constraints (e.g. "Mind-bending thrillers under 2 hours"). All recommendations are verified against our real catalog and streaming database.',
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [input, setInput] = useState('');
+  const [isSending, setIsSending] = useState(false);
+
+  // Stores a poster URL that has already been resolved successfully.
+  const [posterUrls, setPosterUrls] = useState<Record<number, string>>({});
+
+  // Prevent repeated TMDB searches for the same movie.
+  const [posterLookups, setPosterLookups] = useState<Record<number, boolean>>({});
+
+  const suggestions = useMemo(
+    () => [
+      'Recommend a Kannada thriller movie',
+      'Suggest a light comedy for tonight',
+      'Find a mind-bending sci-fi movie',
+    ],
+    [],
+  );
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    setMessages([
+      {
+        id: createId(),
+        role: 'assistant',
+        content:
+          'Tell me what you are in the mood for, and I’ll find a few movies from the CINEMETA catalog.',
+        createdAt: new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+      },
+    ]);
+
+    setInput('');
+    setPosterUrls({});
+    setPosterLookups({});
+  }, [isOpen]);
+
+  const validatePosterUrl = (url: string): Promise<boolean> =>
+    new Promise((resolve) => {
+      const image = new Image();
+
+      image.onload = () => resolve(true);
+      image.onerror = () => resolve(false);
+
+      image.src = url;
+    });
+
+  const findValidPoster = async (movie: Movie): Promise<string> => {
+    const candidates: string[] = [];
+
+    // 1. Try the poster already attached to the movie.
+    const directUrl = getPosterUrl(movie.poster_path);
+    if (directUrl) candidates.push(directUrl);
+
+    // 2. Refresh the movie details from TMDB using the movie ID.
+    try {
+      const details = await api.getMovieDetails(movie.id);
+      const detailUrl = getPosterUrl(details.poster_path);
+
+      if (detailUrl && !candidates.includes(detailUrl)) {
+        candidates.push(detailUrl);
+      }
+    } catch (error) {
+      console.warn(`Movie details lookup failed for ${movie.title}`, error);
     }
-  ]);
-  const [inputText, setInputText] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
 
-  if (!isOpen) return null;
+    // 3. Search by title and prefer the same release year when possible.
+    try {
+      const results = await api.searchMovies(movie.title);
 
-  const handleSendMessage = async (textToSend?: string) => {
-    const query = (textToSend || inputText).trim();
-    if (!query || isLoading) return;
+      const originalYear = movie.release_date?.slice(0, 4);
 
-    const userMsg: Message = {
-      sender: 'user',
-      text: query,
-      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
+      const orderedResults = [...results].sort((a, b) => {
+        const aExactTitle =
+          a.title.trim().toLowerCase() === movie.title.trim().toLowerCase();
+        const bExactTitle =
+          b.title.trim().toLowerCase() === movie.title.trim().toLowerCase();
 
-    setMessages(prev => [...prev, userMsg]);
-    setInputText('');
-    setIsLoading(true);
+        const aYearMatch =
+          Boolean(originalYear) &&
+          a.release_date?.slice(0, 4) === originalYear;
+        const bYearMatch =
+          Boolean(originalYear) &&
+          b.release_date?.slice(0, 4) === originalYear;
+
+        return Number(bExactTitle) - Number(aExactTitle) +
+          (Number(bYearMatch) - Number(aYearMatch));
+      });
+
+      for (const result of orderedResults) {
+        const url = getPosterUrl(result.poster_path);
+
+        if (url && !candidates.includes(url)) {
+          candidates.push(url);
+        }
+      }
+    } catch (error) {
+      console.warn(`Poster search failed for ${movie.title}`, error);
+    }
+
+    // 4. Only return a URL after the browser confirms that the image loads.
+    for (const url of candidates) {
+      const valid = await validatePosterUrl(url);
+
+      if (valid) return url;
+    }
+
+    return '';
+  };
+
+  const resolvePoster = async (movie: Movie) => {
+    if (posterLookups[movie.id]) return;
+
+    setPosterLookups((prev) => ({
+      ...prev,
+      [movie.id]: true,
+    }));
 
     try {
-      const response = await api.sendAssistantMessage(query);
-      const assistantMsg: Message = {
-        sender: 'assistant',
-        text: response.reply,
-        recommendedMovies: response.recommendedMovies,
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      setMessages(prev => [...prev, assistantMsg]);
-    } catch (err: any) {
-      console.error('Assistant error:', err);
-      const errorMsg: Message = {
-        sender: 'assistant',
-        text: 'I apologize, but I encountered an issue matching candidates from our database. Please try another query.',
-        timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-      };
-      setMessages(prev => [...prev, errorMsg]);
-    } finally {
-      setIsLoading(false);
+      const validPoster = await findValidPoster(movie);
+
+      if (validPoster) {
+        setPosterUrls((prev) => ({
+          ...prev,
+          [movie.id]: validPoster,
+        }));
+      } else {
+        // Keep the placeholder instead of ever rendering a broken image.
+        setPosterUrls((prev) => {
+          const next = { ...prev };
+          delete next[movie.id];
+          return next;
+        });
+      }
+    } catch (error) {
+      console.warn(`Could not resolve poster for ${movie.title}`, error);
     }
   };
 
+  const handleSend = async (event?: FormEvent) => {
+    event?.preventDefault();
+
+    const message = input.trim();
+    if (!message || isSending) return;
+
+    setInput('');
+    setIsSending(true);
+
+    const now = new Date().toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+
+    setMessages((prev) => [
+      ...prev,
+      {
+        id: createId(),
+        role: 'user',
+        content: message,
+        createdAt: now,
+      },
+    ]);
+
+    try {
+      const response = await api.sendAssistantMessage(message);
+
+      const recommendedMovies = response.recommendedMovies || [];
+
+      recommendedMovies.forEach((movie) => {
+        void resolvePoster(movie);
+      });
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createId(),
+          role: 'assistant',
+          content:
+            response.reply ||
+            'Here are a few movies that match your request.',
+          recommendedMovies,
+          createdAt: new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+        },
+      ]);
+    } catch (error) {
+      console.error('Assistant error:', error);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createId(),
+          role: 'assistant',
+          content:
+            'I could not reach the movie assistant right now. Please try again.',
+          createdAt: new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+          }),
+        },
+      ]);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  if (!isOpen) return null;
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/85 backdrop-blur-md">
-      <div className="relative w-full max-w-3xl bg-zinc-950 border border-zinc-800 rounded-2xl shadow-2xl overflow-hidden flex flex-col h-[80vh]">
-        
+    <div
+      className="fixed inset-0 z-[70] flex items-center justify-center bg-black/75 p-3 sm:p-5"
+      onClick={onClose}
+    >
+      <div
+        className="flex h-[min(760px,92vh)] w-full max-w-3xl flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
         {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-900/90">
+        <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900 px-5 py-4">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-red-600 to-amber-500 flex items-center justify-center text-white shadow-lg shadow-red-600/30">
-              <Bot className="w-5 h-5" />
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-600 text-white">
+              <Bot className="h-5 w-5" />
             </div>
+
             <div>
               <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-white tracking-wide">CINEMETA AI Assistant</h2>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-semibold border border-emerald-500/30 flex items-center gap-1">
-                  <ShieldCheck className="w-3 h-3" /> Grounded Catalog
+                <h2 className="text-sm font-bold text-white sm:text-base">
+                  CINEMETA AI Assistant
+                </h2>
+                <span className="rounded-full border border-emerald-700/60 bg-emerald-950/50 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
+                  Grounded Catalog
                 </span>
               </div>
-              <p className="text-xs text-zinc-400">Natural-language movie discovery powered by hybrid ML priors</p>
+
+              <p className="text-xs text-zinc-400">
+                Find movies by mood, genre, language, or theme.
+              </p>
             </div>
           </div>
 
           <button
+            type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-zinc-400 hover:text-white hover:bg-zinc-800 transition-colors"
+            className="rounded-lg p-2 text-zinc-400 transition hover:bg-zinc-800 hover:text-white"
+            aria-label="Close assistant"
           >
-            <X className="w-5 h-5" />
+            <X className="h-5 w-5" />
           </button>
         </div>
 
-        {/* Chat Message List */}
-        <div className="flex-1 p-5 overflow-y-auto space-y-4">
-          {messages.map((msg, idx) => (
-            <div
-              key={idx}
-              className={`flex flex-col ${msg.sender === 'user' ? 'items-end' : 'items-start'}`}
-            >
+        {/* Messages */}
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-5">
+          <div className="space-y-4">
+            {messages.map((message) => (
               <div
-                className={`max-w-[85%] rounded-2xl p-4 space-y-3 ${
-                  msg.sender === 'user'
-                    ? 'bg-red-600 text-white rounded-br-none shadow-lg shadow-red-600/20'
-                    : 'bg-zinc-900 border border-zinc-800 text-zinc-200 rounded-bl-none'
-                }`}
+                key={message.id}
+                className={
+                  message.role === 'user'
+                    ? 'flex justify-end'
+                    : 'flex justify-start'
+                }
               >
-                <p className="text-xs sm:text-sm leading-relaxed whitespace-pre-line">{msg.text}</p>
+                <div
+                  className={
+                    message.role === 'user'
+                      ? 'max-w-[86%] rounded-2xl rounded-br-md bg-red-600 px-4 py-3 text-sm text-white'
+                      : 'w-full max-w-[95%] rounded-2xl rounded-bl-md border border-zinc-800 bg-zinc-900 px-4 py-3'
+                  }
+                >
+                  <p className="text-sm leading-6 text-zinc-100">
+                    {message.content}
+                  </p>
 
-                {/* Candidate Movie Cards if attached */}
-                {msg.recommendedMovies && msg.recommendedMovies.length > 0 && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2 border-t border-zinc-800/80">
-                    {msg.recommendedMovies.map((movie) => (
-                      <div
-                        key={movie.id}
-                        onClick={() => {
-                          onSelectMovie(movie);
-                          onClose();
-                        }}
-                        className="p-2.5 rounded-xl bg-zinc-950/80 hover:bg-zinc-800/80 border border-zinc-800 hover:border-red-500/50 flex gap-2.5 items-center cursor-pointer transition-all group"
-                      >
-                        <img
-                          src={movie.poster_path ? (movie.poster_path.startsWith('http') ? movie.poster_path : `https://image.tmdb.org/t/p/w500${movie.poster_path}`) : '/placeholder-poster.jpg'}
-                          alt={movie.title}
-                          className="w-12 aspect-[2/3] object-cover rounded-lg shrink-0"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <p className="text-xs font-bold text-white truncate group-hover:text-red-400 transition-colors">
-                            {movie.title}
-                          </p>
-                          <div className="flex items-center gap-2 text-[10px] text-zinc-400 mt-0.5">
-                            <span>{movie.release_date?.substring(0, 4)}</span>
-                            <span className="text-amber-400 font-bold">★ {movie.vote_average?.toFixed(1)}</span>
-                          </div>
-                          <span className="text-[9px] text-red-400 font-semibold flex items-center gap-0.5 mt-1">
-                            View details & streaming <ChevronRight className="w-2.5 h-2.5" />
-                          </span>
+                  <div className="mt-2 text-[10px] text-zinc-500">
+                    {message.createdAt}
+                  </div>
+
+                  {message.role === 'assistant' &&
+                    message.recommendedMovies &&
+                    message.recommendedMovies.length > 0 && (
+                      <div className="mt-4 border-t border-zinc-800 pt-4">
+                        <div className="mb-3 text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                          Matches from the catalog
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          {message.recommendedMovies.map((movie) => {
+                            const resolvedPoster =
+                              posterUrls[movie.id] ||
+                              getPosterUrl(movie.poster_path);
+
+                            const genres = getGenreNames(movie).slice(0, 2);
+
+                            return (
+                              <div
+                                key={movie.id}
+                                className="flex min-w-0 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950"
+                              >
+                                <div className="h-28 w-20 shrink-0 overflow-hidden bg-zinc-900">
+                                  {resolvedPoster ? (
+                                    <img
+                                      src={resolvedPoster}
+                                      alt={movie.title}
+                                      className="h-full w-full object-cover"
+                                      loading="lazy"
+                                      onError={() => {
+                                        setPosterUrls((prev) => {
+                                          const next = { ...prev };
+                                          delete next[movie.id];
+                                          return next;
+                                        });
+                                      }}
+                                    />
+                                  ) : (
+                                    <div className="flex h-full w-full items-center justify-center bg-zinc-900 text-[11px] text-zinc-600">
+                                      <Search className="h-4 w-4" />
+                                    </div>
+                                  )}
+                                </div>
+
+                                <div className="min-w-0 flex-1 p-3">
+                                  <h3 className="truncate text-sm font-semibold text-white">
+                                    {movie.title}
+                                  </h3>
+
+                                  <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
+                                    {getYear(movie.release_date) && (
+                                      <span>{getYear(movie.release_date)}</span>
+                                    )}
+
+                                    <span className="inline-flex items-center gap-1 text-amber-400">
+                                      <Star className="h-3 w-3 fill-current" />
+                                      {Number(movie.vote_average || 0).toFixed(1)}
+                                    </span>
+                                  </div>
+
+                                  {genres.length > 0 && (
+                                    <div className="mt-1 truncate text-[11px] text-zinc-500">
+                                      {genres.join(' · ')}
+                                    </div>
+                                  )}
+
+                                  <button
+                                    type="button"
+                                    onClick={() => onSelectMovie?.(movie)}
+                                    className="mt-3 inline-flex items-center gap-1 text-[11px] font-medium text-red-400 transition hover:text-red-300"
+                                  >
+                                    View details & streaming
+                                    <ExternalLink className="h-3 w-3" />
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
-                    ))}
-                  </div>
-                )}
-
-                <span className={`text-[9px] block ${msg.sender === 'user' ? 'text-red-200 text-right' : 'text-zinc-500'}`}>
-                  {msg.timestamp}
-                </span>
+                    )}
+                </div>
               </div>
-            </div>
-          ))}
+            ))}
 
-          {isLoading && (
-            <div className="flex items-center gap-2 text-zinc-400 text-xs p-3 bg-zinc-900/60 rounded-xl max-w-xs border border-zinc-800 animate-pulse">
-              <div className="w-3.5 h-3.5 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-              <span>Analyzing catalog & semantic preferences...</span>
-            </div>
-          )}
+            {isSending && (
+              <div className="flex justify-start">
+                <div className="rounded-2xl rounded-bl-md border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-500">
+                  Looking through the catalog…
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Suggested Quick Prompts */}
-        <div className="px-5 py-2.5 bg-zinc-900/40 border-t border-zinc-800/60 flex items-center gap-2 overflow-x-auto scrollbar-none">
-          <span className="text-[10px] text-zinc-500 font-semibold shrink-0 uppercase tracking-wider">Try:</span>
-          {EXAMPLE_PROMPTS.map((prompt, i) => (
+        {/* Suggestions + Input */}
+        <div className="border-t border-zinc-800 bg-zinc-950 px-4 pb-4 pt-3 sm:px-5">
+          <div className="mb-3 flex gap-2 overflow-x-auto pb-1">
+            {suggestions.map((suggestion) => (
+              <button
+                key={suggestion}
+                type="button"
+                onClick={() => setInput(suggestion)}
+                className="whitespace-nowrap rounded-full border border-zinc-800 bg-zinc-900 px-3 py-1.5 text-[11px] text-zinc-400 transition hover:border-zinc-700 hover:text-white"
+              >
+                {suggestion}
+              </button>
+            ))}
+          </div>
+
+          <form onSubmit={handleSend} className="flex gap-2">
+            <input
+              value={input}
+              onChange={(event) => setInput(event.target.value)}
+              placeholder="Ask for a movie…"
+              disabled={isSending}
+              className="min-w-0 flex-1 rounded-xl border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-white outline-none placeholder:text-zinc-600 focus:border-red-500"
+            />
+
             <button
-              key={i}
-              onClick={() => handleSendMessage(prompt)}
-              className="px-2.5 py-1 rounded-lg bg-zinc-900 hover:bg-zinc-800 border border-zinc-800 hover:border-zinc-700 text-zinc-300 hover:text-white text-[11px] whitespace-nowrap shrink-0 transition-colors"
+              type="submit"
+              disabled={!input.trim() || isSending}
+              className="inline-flex items-center gap-2 rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {prompt}
+              <Send className="h-4 w-4" />
+              <span className="hidden sm:inline">Send</span>
             </button>
-          ))}
+          </form>
         </div>
-
-        {/* Input Bar */}
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            handleSendMessage();
-          }}
-          className="p-4 border-t border-zinc-800 bg-zinc-900/90 flex gap-2"
-        >
-          <input
-            type="text"
-            placeholder="Ask anything (e.g., 'Recommend sci-fi thrillers with mind-bending plots')..."
-            value={inputText}
-            onChange={(e) => setInputText(e.target.value)}
-            className="flex-1 bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-2.5 text-xs sm:text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-red-500 focus:ring-1 focus:ring-red-500"
-          />
-          <button
-            type="submit"
-            disabled={isLoading || !inputText.trim()}
-            className="px-4 py-2.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl flex items-center gap-1.5 shadow-lg shadow-red-600/30 transition-all hover:scale-105 active:scale-95"
-          >
-            <Send className="w-4 h-4" />
-            <span className="hidden sm:inline">Send</span>
-          </button>
-        </form>
-
       </div>
     </div>
   );
 };
+
+export default AiAssistantModal;

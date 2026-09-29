@@ -25,7 +25,7 @@ import {
   applySecurityHeaders
 } from './backend/security/auth';
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = 3000;
 
 // ============================================================
 // GOOGLE GEMINI
@@ -1155,9 +1155,10 @@ async function startServer() {
       '/api/ai/assistant',
       async (req: any, res) => {
         try {
-          const {
-            message
-          } = req.body;
+          const message =
+            typeof req.body?.message === 'string'
+              ? req.body.message.trim()
+              : '';
 
           if (!message) {
             return res.status(400).json({
@@ -1170,137 +1171,167 @@ async function startServer() {
               ? req.user.id
               : 'demo-user-123';
 
-          const user =
-            db.getUserById(userId);
-
+          const user = db.getUserById(userId);
           const cleanUser =
             user
               ? db.sanitizeUser(user)
               : undefined;
 
+          // First parse the user's intent locally so we know what to send
+          // to TMDB. The assistant then ranks only movies discovered from
+          // that live TMDB result set.
           const nlpResult =
             recommenderEngine.searchByNaturalLanguage(
               message,
               cleanUser
             );
 
-          const topCandidates =
-            nlpResult.results
-              .slice(0, 4)
-              .map(r => r.movie);
+          const languageAliases: Record<string, string> = {
+            english: 'en',
+            hindi: 'hi',
+            kannada: 'kn',
+            tamil: 'ta',
+            telugu: 'te',
+            malayalam: 'ml',
+            bengali: 'bn',
+            marathi: 'mr',
+            gujarati: 'gu',
+            punjabi: 'pa',
+            urdu: 'ur',
+            korean: 'ko',
+            japanese: 'ja'
+          };
 
-          const ai =
-            getGenAI();
+          const lowerMessage = message.toLowerCase();
+          let requestedLanguage: string | undefined;
 
-          if (ai) {
-            const candidateContext =
-              topCandidates
-                .map(c => {
-                  const genres =
-                    Array.isArray(c.genres)
-                      ? c.genres
-                          .map(g =>
-                            typeof g === 'string'
-                              ? g
-                              : g.name
-                          )
-                          .join(', ')
-                      : '';
-
-                  return (
-                    `- "${c.title}" ` +
-                    `(${c.release_date?.substring(0, 4) || 'N/A'}, ` +
-                    `Rating: ${c.vote_average}/10, ` +
-                    `Genres: ${genres}): ` +
-                    `${c.overview}`
-                  );
-                })
-                .join('\n');
-
-            const systemInstruction = `
-You are CINEMETA AI, an expert and thoughtful movie concierge.
-
-CRITICAL CONSTRAINT:
-You MUST ONLY recommend movies provided in the candidate list below.
-
-NEVER invent, hallucinate, or recommend movies outside this candidate list.
-
-Explain clearly and concisely why the available candidates match the user's request.
-
-Available Catalog Candidates:
-${candidateContext}
-
-User Profile:
-- Favorite Genres: ${
-              cleanUser?.favoriteGenres?.join(', ') ||
-              'Various'
+          for (const [name, code] of Object.entries(languageAliases)) {
+            if (lowerMessage.includes(name)) {
+              requestedLanguage = code;
+              break;
             }
-- Preferred Languages: ${
-              cleanUser?.preferredLanguages?.join(', ') ||
-              'English'
-            }
-- Preferred Moods: ${
-              cleanUser?.onboardingPreferences?.moods?.join(', ') ||
-              'Any'
-            }
-`;
-
-            const response =
-              await ai.models.generateContent({
-                model:
-                  'gemini-2.5-flash',
-
-                contents: [
-                  {
-                    role: 'user',
-                    parts: [
-                      {
-                        text:
-                          `${systemInstruction}\n\nUser Question: ${message}`
-                      }
-                    ]
-                  }
-                ]
-              });
-
-            const replyText =
-              response.text ||
-              `Based on your request, I recommend checking out: ${topCandidates
-                .map(m => m.title)
-                .join(', ')}.`;
-
-            return res.json({
-              reply: replyText,
-              recommendedMovies:
-                topCandidates,
-              extractedFilters:
-                nlpResult.extractedFilters
-            });
           }
 
-          // --------------------------------------------------
-          // Rule-based fallback
-          // --------------------------------------------------
+          // Fall back to the user's saved preferred language only when the
+          // user did not explicitly mention a language in the query.
+          if (!requestedLanguage && cleanUser?.preferredLanguages?.length) {
+            const saved = String(cleanUser.preferredLanguages[0]).toLowerCase();
+            requestedLanguage = languageAliases[saved] || saved;
+          }
 
-          const titles =
-            topCandidates
-              .map(
-                m =>
-                  `"${m.title}" (${m.vote_average}/10)`
-              )
-              .join(', ');
+          const liveCandidates = await tmdbService.discoverAssistantMovies({
+            language: requestedLanguage,
+            genres: nlpResult.extractedFilters.genres,
+            minRating: nlpResult.extractedFilters.minRating,
+            maxRuntime: nlpResult.extractedFilters.maxRuntime,
+            limit: 8
+          });
 
-          const replyText =
-            topCandidates.length > 0
-              ? `Based on your preferences and semantic match, here are the top matching movies from our catalog: ${titles}.`
-              : 'I could not find a strong match in the current CINEMETA catalog.';
+          // Never replace an explicit live-filtered request with unrelated
+          // cached movies. This is what previously allowed Chhota Bheem and
+          // other irrelevant titles to appear for horror/thriller requests.
+          const topCandidates = liveCandidates.slice(0, 4);
+
+          console.log(
+            `[AI ASSISTANT] Source=TMDB LIVE candidates=${topCandidates.length} language=${requestedLanguage || 'any'} genres=${nlpResult.extractedFilters.genres.join(',') || 'any'}`
+          );
+
+          let replyText = '';
+
+          const ai = getGenAI();
+
+          if (ai && topCandidates.length > 0) {
+            try {
+              const candidateContext =
+                topCandidates
+                  .map(c => {
+                    const genres =
+                      Array.isArray(c.genres)
+                        ? c.genres
+                            .map(g =>
+                              typeof g === 'string'
+                                ? g
+                                : g.name
+                            )
+                            .join(', ')
+                        : '';
+
+                    return (
+                      `- "${c.title}" ` +
+                      `(${c.release_date?.substring(0, 4) || 'N/A'}, ` +
+                      `Rating: ${c.vote_average}/10, ` +
+                      `Language: ${c.language || 'unknown'}, ` +
+                      `Genres: ${genres}): ` +
+                      `${c.overview}`
+                    );
+                  })
+                  .join('\n');
+
+              const systemInstruction = `
+You are CINEMETA, a friendly movie recommendation assistant.
+
+Use ONLY the movies in the catalog candidate list below.
+Do not invent titles that are not in the list.
+Keep the response concise and conversational.
+
+Catalog candidates:
+${candidateContext}
+
+User profile:
+- Favorite genres: ${cleanUser?.favoriteGenres?.join(', ') || 'Various'}
+- Preferred languages: ${cleanUser?.preferredLanguages?.join(', ') || 'Various'}
+- Preferred moods: ${cleanUser?.onboardingPreferences?.moods?.join(', ') || 'Any'}
+`;
+
+              const response =
+                await ai.models.generateContent({
+                  model: 'gemini-2.5-flash',
+                  contents: [
+                    {
+                      role: 'user',
+                      parts: [
+                        {
+                          text:
+                            `${systemInstruction}\n\nUser request: ${message}`
+                        }
+                      ]
+                    }
+                  ]
+                });
+
+              replyText =
+                response.text?.trim() || '';
+            } catch (aiError) {
+              // Gemini is an enhancement, not a dependency.
+              // A provider/API failure must not break the assistant.
+              console.warn(
+                '[AI ASSISTANT] Gemini response failed; using grounded fallback:',
+                aiError
+              );
+            }
+          }
+
+          // Reliable fallback when Gemini is unavailable, times out,
+          // rejects the request, or returns no text.
+          if (!replyText) {
+            if (topCandidates.length === 0) {
+              replyText =
+                'I could not find a matching movie on TMDB for those filters. Try another language, genre, or a broader request.';
+            } else {
+              const titles = topCandidates
+                .slice(0, 3)
+                .map(m => m.title)
+                .join(', ');
+
+              replyText =
+                `Here are a few matches from the catalog: ${titles}.`;
+            }
+          }
 
           return res.json({
             reply: replyText,
-            recommendedMovies:
-              topCandidates,
-            extractedFilters:
-              nlpResult.extractedFilters
+            recommendedMovies: topCandidates,
+            extractedFilters: nlpResult.extractedFilters
           });
         } catch (err: any) {
           console.error(
@@ -1308,9 +1339,17 @@ User Profile:
             err
           );
 
-          return res.status(500).json({
-            error:
-              'Failed to process assistant request'
+          // Return a usable assistant response instead of a 500
+          // whenever possible.
+          return res.json({
+            reply:
+              'I could not process that request right now. Try a movie title, genre, language, or mood.',
+            recommendedMovies: [],
+            extractedFilters: {
+              genres: [],
+              moods: [],
+              keywords: []
+            }
           });
         }
       }
@@ -1351,8 +1390,48 @@ User Profile:
           const {
             selectedMovieIds,
             selectedMovies,
+            preferredLanguages,
+            favoriteGenres,
+            preferences,
             diversityLambda
           } = req.body;
+
+          // Step 5 runs before onboarding is saved, so the database user
+          // can still contain the old language preferences. Build a temporary
+          // recommendation profile from the current onboarding selections.
+          const hasPreviewLanguages =
+            Array.isArray(preferredLanguages) &&
+            preferredLanguages.length > 0;
+
+          const storedUser = user as any;
+
+          const recommendationUser = {
+            ...storedUser,
+            preferredLanguages: hasPreviewLanguages
+              ? preferredLanguages
+              : storedUser.preferredLanguages,
+            favoriteGenres:
+              Array.isArray(favoriteGenres)
+                ? favoriteGenres
+                : storedUser.favoriteGenres,
+            onboardingPreferences:
+              preferences && typeof preferences === 'object'
+                ? {
+                    ...(storedUser.onboardingPreferences || {}),
+                    ...preferences
+                  }
+                : storedUser.onboardingPreferences,
+            // Treat the preview as an active onboarding profile so the
+            // recommendation engine applies its hard language constraint.
+            onboardingCompleted:
+              hasPreviewLanguages
+                ? true
+                : Boolean(storedUser.onboardingCompleted)
+          };
+
+          console.log(
+            `[REC PIPELINE LOG] Preview languages: ${(recommendationUser.preferredLanguages || []).join(', ') || 'none'}`
+          );
 
           console.log(
             '\n=================== [REC PIPELINE LOG] GENERATE RECOMMENDATIONS ==================='
@@ -1433,7 +1512,7 @@ User Profile:
 
           const result =
               await recommenderEngine.generateUnifiedRecommendations(
-              user,
+              recommendationUser,
               targetIds,
               20,
               typeof diversityLambda === 'number'
